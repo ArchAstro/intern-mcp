@@ -64,7 +64,12 @@ process.stdout.write(JSON.stringify({
       { name: "intern-ctl-devbox", port_name: "intern-ctl", port: 5102 },
       { name: "intern-fe", port_name: "intern-fe", port: ${frontendPort} }
     ],
-    ports: { platform: ${platformPort}, "intern-fe": ${frontendPort}, "intern-ctl": 5102 }
+    ports: {
+      platform: ${platformPort},
+      "intern-fe": ${frontendPort},
+      "intern-ctl": 5102,
+      "intern-gateway-ssh": 2224
+    }
   }]
 }));
 `,
