@@ -1,8 +1,26 @@
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
+import { completable, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { AuthClient } from "./auth.js";
 import type { InternAPI } from "./api.js";
+import { PACKAGE_VERSION } from "./config.js";
 import type { WorkspaceManager } from "./workspace.js";
+
+const siteSlug = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{0,62}$/)
+  .describe(
+    "Intern site slug: a lowercase letter, then lowercase letters, digits, or hyphens",
+  );
+
+const SERVER_INSTRUCTIONS = [
+  "Work on Intern-hosted sites in guarded local Git checkouts. Intern never stages or commits files.",
+  "1. intern_auth_status — if unauthorized, intern_login then intern_complete_login after the user approves the device page.",
+  "2. intern_prepare_site — clone or reuse the checkout; edit files at the returned absolute path with the host's filesystem tools.",
+  "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. Call it again after further edits. intern_stop_test stops it.",
+  "4. Commit with the host's git, then intern_validate_site against Intern's runtime contract.",
+  "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation.",
+  "Use intern_list_sites and intern_site_status to inspect. intern_logout removes credentials and stops previews; it does not delete sites or files.",
+].join("\n");
 
 const sessionSchema = z.object({
   user: z.object({
@@ -66,15 +84,19 @@ export function buildServer(
   api: InternAPI,
   workspaces: WorkspaceManager,
 ): McpServer {
-  const server = new McpServer({
-    name: "intern",
-    version: "0.1.0",
-    description: "Work on Intern-hosted sites in guarded local Git checkouts",
-  });
+  const server = new McpServer(
+    {
+      name: "intern",
+      version: PACKAGE_VERSION,
+      description: "Work on Intern-hosted sites in guarded local Git checkouts",
+    },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
 
   server.registerTool(
     "intern_auth_status",
     {
+      title: "Check Intern authorization",
       description:
         "Check whether this local MCP is authorized with Intern and return the current user and organization without exposing credentials.",
       outputSchema: z.object({
@@ -94,9 +116,15 @@ export function buildServer(
   server.registerTool(
     "intern_login",
     {
+      title: "Start Intern sign-in",
       description:
         "Start Intern browser authorization. After approval, call intern_complete_login before using site tools.",
-      inputSchema: z.object({ openBrowser: z.boolean().default(true) }),
+      inputSchema: z.object({
+        openBrowser: z
+          .boolean()
+          .default(true)
+          .describe("Open the device-approval page in the user's browser"),
+      }),
       outputSchema: z.object({
         userCode: z.string(),
         verificationURI: z.string(),
@@ -116,10 +144,17 @@ export function buildServer(
   server.registerTool(
     "intern_complete_login",
     {
+      title: "Finish Intern sign-in",
       description:
         "Finish a pending Intern browser authorization after the user approves it.",
       inputSchema: z.object({
-        timeoutSeconds: z.number().int().min(1).max(300).default(120),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(300)
+          .default(120)
+          .describe("Seconds to wait for the user to approve the device page"),
       }),
       outputSchema: z.object({ authorized: z.literal(true), session: sessionSchema }),
       annotations: {
@@ -138,6 +173,7 @@ export function buildServer(
   server.registerTool(
     "intern_logout",
     {
+      title: "Sign out of Intern",
       description:
         "Remove this profile's local Intern credentials. This does not delete sites or files.",
       outputSchema: z.object({ authorized: z.literal(false) }),
@@ -160,6 +196,7 @@ export function buildServer(
   server.registerTool(
     "intern_list_sites",
     {
+      title: "List Intern sites",
       description: "List sites in the authorized Intern organization.",
       outputSchema: z.object({ sites: z.array(siteSchema) }),
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -170,12 +207,19 @@ export function buildServer(
   server.registerTool(
     "intern_prepare_site",
     {
+      title: "Prepare Intern checkout",
       description:
         "Clone or validate an Intern site's guarded local checkout and return its absolute path. Remote creation occurs only when createIfMissing is true.",
       inputSchema: z.object({
-        site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
-        createIfMissing: z.boolean().default(false),
-        siteType: z.string().default("vite"),
+        site: siteSlug,
+        createIfMissing: z
+          .boolean()
+          .default(false)
+          .describe("Create the remote Intern site if it does not exist"),
+        siteType: z
+          .string()
+          .default("vite")
+          .describe("Runtime site type used only when creating a missing site"),
       }),
       outputSchema: z.object({
         site: siteSchema,
@@ -211,8 +255,9 @@ export function buildServer(
   server.registerTool(
     "intern_site_status",
     {
+      title: "Inspect Intern checkout",
       description: "Inspect one prepared Intern checkout without changing it.",
-      inputSchema: z.object({ site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/) }),
+      inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({ site: siteSchema, workspace: workspaceSchema }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -228,15 +273,21 @@ export function buildServer(
   server.registerTool(
     "intern_validate_site",
     {
+      title: "Validate Intern commit",
       description:
         "Validate the prepared checkout's committed HEAD against Intern's authenticated runtime contract. Checks required and protected files, package support, entrypoint syntax, sandboxed startup, and an HTTP response without changing the checkout. Commit model edits first; dirty changes are reported in workspace status but are not part of validation.",
-      inputSchema: z.object({ site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/) }),
+      inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
         workspace: workspaceSchema,
         validation: validationSchema,
       }),
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
     async ({ site: slug }) => {
       const { session, site } = await resolveSite(api, slug);
@@ -253,9 +304,10 @@ export function buildServer(
   server.registerTool(
     "intern_test_site",
     {
+      title: "Preview Intern working tree",
       description:
         "Validate the current working tree, replace any prior preview for this site, and serve a temporary snapshot at a loopback HTTP URL. This includes uncommitted tracked and untracked files but excludes ignored files; call it again after edits to refresh the snapshot.",
-      inputSchema: z.object({ site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/) }),
+      inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
         workspace: workspaceSchema,
@@ -284,9 +336,10 @@ export function buildServer(
   server.registerTool(
     "intern_stop_test",
     {
+      title: "Stop Intern preview",
       description:
         "Stop and remove this site's local loopback test snapshot without contacting Intern. It works after logout or during a backend outage and never changes the Git checkout.",
-      inputSchema: z.object({ site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/) }),
+      inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({ site: z.string(), stopped: z.boolean() }),
       annotations: {
         readOnlyHint: false,
@@ -303,9 +356,10 @@ export function buildServer(
   server.registerTool(
     "intern_publish_site",
     {
+      title: "Publish Intern site",
       description:
         "Validate and push the clean, committed HEAD of a prepared Intern checkout. Refuses runtime-incompatible changes, dirty trees, detached HEADs, unexpected remotes, and non-fast-forward pushes.",
-      inputSchema: z.object({ site: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/) }),
+      inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
         workspace: workspaceSchema,
@@ -334,6 +388,8 @@ export function buildServer(
     "intern://session",
     {
       title: "Intern authorization session",
+      description:
+        "Current Intern user and organization. Does not include credentials.",
       mimeType: "application/json",
     },
     async (uri) => jsonResource(uri, await api.session()),
@@ -344,6 +400,7 @@ export function buildServer(
     "intern://sites",
     {
       title: "Intern sites",
+      description: "Sites in the authorized Intern organization.",
       mimeType: "application/json",
     },
     async (uri) => jsonResource(uri, { sites: await api.listSites() }),
@@ -359,9 +416,13 @@ export function buildServer(
           mimeType: "application/json",
         })),
       }),
+      complete: {
+        slug: (value) => completeSiteSlugs(api, value),
+      },
     }),
     {
       title: "Intern site workspace",
+      description: "Local Git checkout status for one Intern site.",
       mimeType: "application/json",
     },
     async (uri, variables) => {
@@ -376,7 +437,73 @@ export function buildServer(
     },
   );
 
+  server.registerPrompt(
+    "intern_sign_in",
+    {
+      title: "Sign in to Intern",
+      description:
+        "Authorize this local MCP with Intern using the device-approval page.",
+    },
+    () => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              "Authorize this local Intern MCP.",
+              "1. Call intern_login with openBrowser true.",
+              "2. Ask the user to open verificationURIComplete (or enter userCode at verificationURI) and approve the device page.",
+              "3. Call intern_complete_login and wait for authorized: true.",
+              "4. Confirm with intern_auth_status.",
+              "Do not put tokens or credentials in chat.",
+            ].join("\n"),
+          },
+        },
+      ],
+    }),
+  );
+
+  server.registerPrompt(
+    "intern_work_on_site",
+    {
+      title: "Work on an Intern site",
+      description: "Prepare, preview, validate, and publish one Intern site.",
+      argsSchema: z.object({
+        site: completable(siteSlug, (value) => completeSiteSlugs(api, value)),
+      }),
+    },
+    ({ site }) => ({
+      messages: [
+        {
+          role: "user" as const,
+          content: {
+            type: "text" as const,
+            text: [
+              `Work on Intern site "${site}".`,
+              "1. Call intern_auth_status. If unauthorized, follow the Intern sign-in flow first.",
+              `2. Call intern_prepare_site with site "${site}". Edit files at the returned workspace.path using this host's filesystem tools.`,
+              "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). Call it again after further edits. intern_stop_test stops the preview.",
+              "4. Commit with this host's git, then call intern_validate_site.",
+              "5. Call intern_publish_site only when validation is valid and the worktree is clean.",
+            ].join("\n"),
+          },
+        },
+      ],
+    }),
+  );
+
   return server;
+}
+
+async function completeSiteSlugs(api: InternAPI, value: string): Promise<string[]> {
+  try {
+    return (await api.listSites())
+      .map((site) => site.slug)
+      .filter((slug) => slug.startsWith(value));
+  } catch {
+    return [];
+  }
 }
 
 async function resolveSite(api: InternAPI, slug: string) {

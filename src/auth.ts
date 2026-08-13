@@ -58,11 +58,22 @@ export class AuthClient {
     const body = await json(response);
     if (!response.ok)
       throw new Error(`authorization start failed: ${errorMessage(body)}`);
+    const verificationURI = assertHttpUrl(
+      requiredString(body, "verification_uri"),
+      "verification URL",
+    );
+    const verificationURIComplete = assertHttpUrl(
+      requiredString(body, "verification_uri_complete"),
+      "verification URL",
+    );
+    if (new URL(verificationURI).origin !== new URL(verificationURIComplete).origin) {
+      throw new Error("Intern returned verification URLs on different origins");
+    }
     const pending: PendingAuthorization = {
       deviceCode: requiredString(body, "device_code"),
       userCode: requiredString(body, "user_code"),
-      verificationURI: requiredString(body, "verification_uri"),
-      verificationURIComplete: requiredString(body, "verification_uri_complete"),
+      verificationURI,
+      verificationURIComplete,
       expiresAt: Date.now() + requiredNumber(body, "expires_in") * 1000,
       intervalSeconds: Math.max(requiredNumber(body, "interval"), 1),
     };
@@ -240,15 +251,35 @@ function errorMessage(value: Record<string, unknown>): string {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export function assertHttpUrl(value: string, label: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Intern returned an invalid ${label}`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+    throw new Error(`Intern returned a non-HTTP ${label}`);
+  if (parsed.username || parsed.password)
+    throw new Error(`Intern returned a ${label} with embedded credentials`);
+  if (parsed.protocol === "http:" && !isLoopbackHost(parsed.hostname))
+    throw new Error(`Intern returned a non-HTTPS ${label}`);
+  return parsed.href;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
 function openBrowser(url: string): void {
-  const command =
+  const href = assertHttpUrl(url, "verification URL");
+  const child =
     process.platform === "darwin"
-      ? "open"
+      ? spawn("open", [href], { detached: true, stdio: "ignore" })
       : process.platform === "win32"
-        ? "cmd"
-        : "xdg-open";
-  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+        ? spawn("explorer.exe", [href], { detached: true, stdio: "ignore" })
+        : spawn("xdg-open", [href], { detached: true, stdio: "ignore" });
   child.on("error", () => {});
   child.unref();
 }

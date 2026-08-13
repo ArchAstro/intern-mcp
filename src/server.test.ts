@@ -5,15 +5,92 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { Client } from "@modelcontextprotocol/client";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterEach, expect, test } from "vitest";
 import type { SiteRuntimeContract } from "./api.js";
+import { PACKAGE_VERSION } from "./config.js";
+import { buildServer } from "./server.js";
 
 const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+test("advertises MCP titles, instructions, field descriptions, and workflow prompts", async () => {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = buildServer(
+    {
+      hasCredentials: async () => false,
+    } as never,
+    {
+      listSites: async () => [{ slug: "docs" }, { slug: "blog" }],
+    } as never,
+    {} as never,
+  );
+  const client = new Client({ name: "intern-contract", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    expect(client.getServerVersion()).toMatchObject({
+      name: "intern",
+      version: PACKAGE_VERSION,
+    });
+    expect(client.getInstructions()).toMatch(/intern_prepare_site/);
+    expect(client.getInstructions()).toMatch(/never stages or commits/i);
+
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        "intern_auth_status",
+        "intern_login",
+        "intern_complete_login",
+        "intern_logout",
+        "intern_list_sites",
+        "intern_prepare_site",
+        "intern_site_status",
+        "intern_validate_site",
+        "intern_test_site",
+        "intern_stop_test",
+        "intern_publish_site",
+      ]),
+    );
+    for (const tool of tools.tools) expect(tool.title, tool.name).toBeTruthy();
+    const prepare = tools.tools.find((tool) => tool.name === "intern_prepare_site");
+    expect(prepare?.inputSchema).toMatchObject({
+      properties: {
+        site: { description: expect.stringMatching(/slug/i) },
+        createIfMissing: { description: expect.stringMatching(/create/i) },
+      },
+    });
+    expect(prepare?.annotations).toMatchObject({
+      readOnlyHint: false,
+      idempotentHint: true,
+    });
+
+    const prompts = await client.listPrompts();
+    expect(prompts.prompts.map((prompt) => prompt.name)).toEqual(
+      expect.arrayContaining(["intern_sign_in", "intern_work_on_site"]),
+    );
+    const workflow = await client.getPrompt({
+      name: "intern_work_on_site",
+      arguments: { site: "docs" },
+    });
+    expect(workflow.messages[0]?.content).toMatchObject({
+      type: "text",
+      text: expect.stringContaining('intern_prepare_site with site "docs"'),
+    });
+
+    const resources = await client.listResources();
+    expect(
+      resources.resources.find((resource) => resource.uri === "intern://session")
+        ?.description,
+    ).toMatch(/does not include credentials/i);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 async function previewTemporaryDirectories(): Promise<Set<string>> {
