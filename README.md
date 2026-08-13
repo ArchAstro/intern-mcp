@@ -54,10 +54,12 @@ commands above become available after the first package release.
 
 Maintainers run the manual **release** workflow to publish the version in
 `package.json`. The first release uses a short-lived `NPM_TOKEN` repository
-secret because npm cannot attach a trusted publisher to a package that does
-not exist. After `0.1.0`, configure `ArchAstro/intern-mcp` and `release.yml` as
-the npm trusted publisher, remove the secret, and later runs authenticate with
-GitHub OIDC.
+secret in the protected `npm-release` environment because npm cannot attach a
+trusted publisher to a package that does not exist. That environment accepts
+only protected branches; `main` itself requires CI and approving review. After
+`0.1.0`, configure `ArchAstro/intern-mcp`, `release.yml`, and environment
+`npm-release` as the npm trusted publisher, remove the secret, and later runs
+authenticate with GitHub OIDC.
 
 ## Configure the server
 
