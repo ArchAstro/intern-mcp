@@ -41,6 +41,13 @@ credential is placed in harness configuration.
 The repository is private and the npm package has not been published yet. The
 commands above become available after the first package release.
 
+Maintainers run the manual **release** workflow to publish the version in
+`package.json`. The first release uses a short-lived `NPM_TOKEN` repository
+secret because npm cannot attach a trusted publisher to a package that does
+not exist. After `0.1.0`, configure `ArchAstro/intern-mcp` and `release.yml` as
+the npm trusted publisher, remove the secret, and later runs authenticate with
+GitHub OIDC.
+
 ## Configure the server
 
 Production public values are built in:
@@ -152,3 +159,21 @@ CI also installs the pinned Codex and Claude CLIs and runs
 `npm run test:harnesses`. That proof asks both real harnesses to register the
 tarball in isolated temporary user profiles; Claude must connect successfully.
 The script never changes the operator's real Codex or Claude configuration.
+
+## Runtime-contract fixture
+
+Firstlanding's `services/go/intern-data/internal/sites/runtime-contract.json`
+owns the backend contract. This repository keeps a byte-for-byte fixture so
+its fail-closed parser, validator, and Git tests exercise the current protected
+runtime. When the backend contract changes, update the two repositories in the
+same change set:
+
+```sh
+node scripts/runtime-contract.mjs sync ../firstlanding-wt2
+npm run check:runtime-contract -- ../firstlanding-wt2
+npm run check
+```
+
+Firstlanding's canonical `scripts/intern/e2e-local.sh` crosses the live backend
+and this sibling checkout. It is the compatibility proof; the fixture is not a
+second source of truth.

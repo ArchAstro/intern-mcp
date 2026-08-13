@@ -34,6 +34,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "check:runtime-contract": "node scripts/runtime-contract.mjs check",
     "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:package",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
