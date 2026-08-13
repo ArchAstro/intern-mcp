@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build, test, lint, and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:package
+
+      - name: Install target harness CLIs
+        run: npm install --global @openai/codex@0.147.0 @anthropic-ai/claude-code@2.1.229
+
+      - name: Verify Codex and Claude registration
+        run: npm run test:harnesses
+
+      - name: Validate workflow syntax
+        uses: raven-actions/actionlint@01fce4f43a270a612932cb1c64d40505a029f821 # v2
+
+      - name: Check whitespace
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^
+          else
+            git diff --check --cached
+          fi

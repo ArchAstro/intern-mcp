@@ -1,0 +1,62 @@
+{
+  "name": "@archastro/intern-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server for building and publishing TryIntern sites",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "intern-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tryintern",
+    "codex",
+    "claude"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArchAstro/intern-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ArchAstro/intern-mcp/issues"
+  },
+  "homepage": "https://tryintern.dev",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:package",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "prepack": "npm run build",
+    "test:harnesses": "node scripts/harness-install-smoke.mjs",
+    "test:package": "node scripts/package-smoke.mjs",
+    "test": "vitest run",
+    "start": "node dist/index.js serve"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.2",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "^22",
+    "eslint": "9.39.2",
+    "globals": "16.5.0",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.53.0",
+    "vitest": "^4.1.8"
+  }
+}
