@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_ARCHASTRO_API_URL,
   DEFAULT_ARCHASTRO_PUBLISHABLE_KEY,
   DEFAULT_INTERN_BASE_URL,
   DEFAULT_INTERN_OAUTH_CLIENT_ID,
   loadConfig,
+  PACKAGE_VERSION,
 } from "./config.js";
 
 describe("loadConfig", () => {
+  it("uses the published package version for MCP server identity", () => {
+    const packed = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+    ) as { version: string };
+    expect(PACKAGE_VERSION).toBe(packed.version);
+  });
+
   it("uses TryIntern production public values by default", () => {
     const config = loadConfig({ HOME: "/tmp/intern-config-test" });
 

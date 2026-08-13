@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+export const PACKAGE_VERSION = (
+  JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+    version: string;
+  }
+).version;
 
 export const DEFAULT_INTERN_BASE_URL = "https://tryintern.dev";
 export const DEFAULT_ARCHASTRO_API_URL = "https://platform.archastro.ai";
