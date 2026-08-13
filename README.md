@@ -14,7 +14,7 @@ installation working on machines that route `@archastro` elsewhere.
 ```sh
 codex mcp add intern -- \
   npx --yes --@archastro:registry=https://registry.npmjs.org \
-  @archastro/intern-mcp@latest serve
+  @archastro/intern-mcp@0.1.0 serve
 codex mcp get intern
 ```
 
@@ -26,7 +26,7 @@ user configuration and starts the package when a session needs the server.
 ```sh
 claude mcp add --transport stdio --scope user intern -- \
   npx --yes --@archastro:registry=https://registry.npmjs.org \
-  @archastro/intern-mcp@latest serve
+  @archastro/intern-mcp@0.1.0 serve
 claude mcp get intern
 ```
 
@@ -37,6 +37,17 @@ Run `/mcp` inside Claude Code to inspect the connection.
 The two harnesses launch the same local stdio executable. Authentication still
 uses `intern_login` and the TryIntern device page; no OAuth secret or service
 credential is placed in harness configuration.
+
+Upgrades are explicit: remove the existing registration and add it again with
+the reviewed version replacing `0.1.0`:
+
+```sh
+codex mcp remove intern
+claude mcp remove intern
+```
+
+Then rerun the corresponding command above. The harness never executes a newly
+published package version merely because it restarted.
 
 The repository is private and the npm package has not been published yet. The
 commands above become available after the first package release.
