@@ -64,9 +64,9 @@ ports=$(printf '%s' "$ports_json" | node --input-type=module -e '
   // Use the Aster worktree allocation instead of assuming default local ports.
   const platform = instance.ports?.platform;
   const frontend = servicePort("intern-fe");
-  // Aster 0.11 reports selected service ports. The SSH listener is an
-  // auxiliary port derived from the same worktree Platform allocation.
-  const gatewaySSH = instance.ports?.["intern-gateway-ssh"] ?? 2222 + Math.max(platform - 4000, 0);
+  // Require the auxiliary port reported by Aster. Deriving it locally can disagree
+  // with the collision-free Aster allocation and target the wrong SSH listener.
+  const gatewaySSH = instance.ports?.["intern-gateway-ssh"];
   const validPort = (port) => Number.isInteger(port) && port >= 1 && port <= 65535;
   if (!validPort(platform) || !validPort(frontend) || !validPort(gatewaySSH)) {
     console.error("The active Intern stack did not report its platform, intern-fe, and intern-gateway-ssh ports.");
