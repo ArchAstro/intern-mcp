@@ -6,40 +6,44 @@ import { loadConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { WorkspaceManager } from "./workspace.js";
 import { SSHCredentialManager } from "./ssh.js";
+import { parseSetupHost, readStoredAccessToken, runSetup } from "./setup.js";
 
 const config = loadConfig();
-const auth = new AuthClient(config);
-const api = new InternAPI(config, auth);
-const ssh = new SSHCredentialManager(config, api);
-const workspaces = new WorkspaceManager(config, ssh);
 const command = process.argv[2] ?? "serve";
 
 switch (command) {
   case "serve":
-    await serveUntilClosed();
+    await serveUntilClosed(new AuthClient());
     break;
-  case "login": {
-    const instructions = await auth.startLogin(true);
-    process.stderr.write(
-      `Open ${instructions.verificationURIComplete}\nCode: ${instructions.userCode}\n`,
-    );
-    await auth.completeLogin();
-    process.stdout.write(`${JSON.stringify(await api.session(), null, 2)}\n`);
-    break;
-  }
-  case "logout":
-    await auth.logout();
-    process.stdout.write("Logged out of Intern.\n");
+  case "launch":
+    await serveUntilClosed(new AuthClient(await readStoredAccessToken(config)));
     break;
   case "status":
-    process.stdout.write(`${JSON.stringify(await api.session(), null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify(await new InternAPI(config, new AuthClient()).session(), null, 2)}\n`,
+    );
+    break;
+  case "setup":
+    try {
+      await runSetup(config, parseSetupHost(process.argv.slice(3)));
+    } catch (error) {
+      process.stderr.write(
+        `Intern setup failed: ${error instanceof Error ? error.message : "request failed"}\n`,
+      );
+      process.exitCode = 1;
+    }
     break;
   default:
-    process.stderr.write("Usage: intern-mcp serve|login|logout|status\n");
+    process.stderr.write(
+      "Usage: intern-mcp serve|launch|status|setup --host codex|claude\n",
+    );
     process.exitCode = 2;
 }
 
-async function serveUntilClosed(): Promise<void> {
+async function serveUntilClosed(auth: AuthClient): Promise<void> {
+  const api = new InternAPI(config, auth);
+  const ssh = new SSHCredentialManager(config, api);
+  const workspaces = new WorkspaceManager(config, ssh);
   const handle = serveStdio(() => buildServer(auth, api, workspaces));
   await new Promise<void>((resolve) => {
     let closing = false;

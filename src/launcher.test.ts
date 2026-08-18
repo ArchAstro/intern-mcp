@@ -75,15 +75,6 @@ process.stdout.write(JSON.stringify({
 `,
     );
     await chmod(fakeAster, 0o755);
-    const localEnv = path.join(root, "intern.env");
-    await writeFile(
-      localEnv,
-      `ARCHASTRO_PUBLISHABLE_KEY=pk_test
-INTERN_OAUTH_CLIENT_ID=cc_test
-INTERN_DEVICE_VERIFICATION_URI=http://127.0.0.1:${frontendPort}/device
-`,
-    );
-
     // Cross the executable shell, Aster JSON, HTTP health, build, and MCP stdio boundaries.
     const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
     const transport = new StdioClientTransport({
@@ -93,7 +84,7 @@ INTERN_DEVICE_VERIFICATION_URI=http://127.0.0.1:${frontendPort}/device
         ...process.env,
         ASTER_BIN: fakeAster,
         INTERN_PLATFORM_WORKSPACE: platformWorkspace,
-        INTERN_LOCAL_ENV_FILE: localEnv,
+        INTERN_ACCESS_TOKEN: "launcher-proof-token",
         INTERN_CONFIG_ROOT: path.join(root, "config"),
         INTERN_WORKSPACE_ROOT: path.join(root, "sites"),
       },

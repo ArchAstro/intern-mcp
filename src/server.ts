@@ -5,21 +5,26 @@ import type { InternAPI } from "./api.js";
 import { PACKAGE_VERSION } from "./config.js";
 import type { WorkspaceManager } from "./workspace.js";
 
-const siteSlug = z
-  .string()
-  .regex(/^[a-z][a-z0-9-]{0,62}$/)
-  .describe(
-    "Intern site slug: a lowercase letter, then lowercase letters, digits, or hyphens",
-  );
+function siteSlugSchema() {
+  return z
+    .string()
+    .regex(/^[a-z][a-z0-9-]{0,62}$/)
+    .describe(
+      "Intern site slug: a lowercase letter, then lowercase letters, digits, or hyphens",
+    );
+}
+
+const siteSlug = siteSlugSchema();
 
 const SERVER_INSTRUCTIONS = [
   "Work on Intern-hosted sites in guarded local Git checkouts. Intern never stages or commits files.",
-  "1. intern_auth_status — if unauthorized, intern_login then intern_complete_login after the user approves the device page.",
+  "Authentication comes from the mode-0600 profile used by intern-mcp launch, or from INTERN_ACCESS_TOKEN in a manual stdio configuration. If it is missing, ask the user to create a profile token at https://tryintern.dev/connect and run the setup command shown there. Never ask the user to paste a token into chat or a tool call.",
+  "1. intern_auth_status — confirm the configured token resolves to the expected user and organization.",
   "2. intern_prepare_site — clone or reuse the checkout; edit files at the returned absolute path with the host's filesystem tools.",
   "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. Call it again after further edits. intern_stop_test stops it.",
   "4. Commit with the host's git, then intern_validate_site against Intern's runtime contract.",
   "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation.",
-  "Use intern_list_sites and intern_site_status to inspect. intern_logout removes credentials and stops previews; it does not delete sites or files.",
+  "Use intern_list_sites and intern_site_status to inspect. Setup users rotate access by rerunning setup and restarting the host; manual users update INTERN_ACCESS_TOKEN and restart it.",
 ].join("\n");
 
 const sessionSchema = z.object({
@@ -102,94 +107,26 @@ export function buildServer(
       outputSchema: z.object({
         authorized: z.boolean(),
         session: sessionSchema.optional(),
+        setupURL: z.string().optional(),
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async () =>
-      result(
-        (await auth.hasCredentials())
-          ? { authorized: true, session: await api.session() }
-          : { authorized: false },
-      ),
-  );
-
-  server.registerTool(
-    "intern_login",
-    {
-      title: "Start Intern sign-in",
-      description:
-        "Start Intern browser authorization. After approval, call intern_complete_login before using site tools.",
-      inputSchema: z.object({
-        openBrowser: z
-          .boolean()
-          .default(true)
-          .describe("Open the device-approval page in the user's browser"),
-      }),
-      outputSchema: z.object({
-        userCode: z.string(),
-        verificationURI: z.string(),
-        verificationURIComplete: z.string(),
-        expiresAt: z.number(),
-      }),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    async ({ openBrowser }) => result(await auth.startLogin(openBrowser)),
-  );
-
-  server.registerTool(
-    "intern_complete_login",
-    {
-      title: "Finish Intern sign-in",
-      description:
-        "Finish a pending Intern browser authorization after the user approves it.",
-      inputSchema: z.object({
-        timeoutSeconds: z
-          .number()
-          .int()
-          .min(1)
-          .max(300)
-          .default(120)
-          .describe("Seconds to wait for the user to approve the device page"),
-      }),
-      outputSchema: z.object({ authorized: z.literal(true), session: sessionSchema }),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: false,
-        idempotentHint: false,
-        openWorldHint: true,
-      },
-    },
-    async ({ timeoutSeconds }) => {
-      await auth.completeLogin(timeoutSeconds * 1000);
-      return result({ authorized: true as const, session: await api.session() });
-    },
-  );
-
-  server.registerTool(
-    "intern_logout",
-    {
-      title: "Sign out of Intern",
-      description:
-        "Remove this profile's local Intern credentials. This does not delete sites or files.",
-      outputSchema: z.object({ authorized: z.literal(false) }),
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-    },
     async () => {
-      await workspaces.stopAllTestsThen(async () => {
-        await workspaces.clearSSHCertificate();
-        await auth.logout();
-      });
-      return result({ authorized: false as const });
+      if (!(await auth.hasCredentials())) {
+        return result({
+          authorized: false,
+          setupURL: "https://tryintern.dev/connect",
+        });
+      }
+      try {
+        return result({ authorized: true, session: await api.session() });
+      } catch (error) {
+        if (!isAuthRequired(error)) throw error;
+        return result({
+          authorized: false,
+          setupURL: "https://tryintern.dev/connect",
+        });
+      }
     },
   );
 
@@ -438,39 +375,12 @@ export function buildServer(
   );
 
   server.registerPrompt(
-    "intern_sign_in",
-    {
-      title: "Sign in to Intern",
-      description:
-        "Authorize this local MCP with Intern using the device-approval page.",
-    },
-    () => ({
-      messages: [
-        {
-          role: "user" as const,
-          content: {
-            type: "text" as const,
-            text: [
-              "Authorize this local Intern MCP.",
-              "1. Call intern_login with openBrowser true.",
-              "2. Ask the user to open verificationURIComplete (or enter userCode at verificationURI) and approve the device page.",
-              "3. Call intern_complete_login and wait for authorized: true.",
-              "4. Confirm with intern_auth_status.",
-              "Do not put tokens or credentials in chat.",
-            ].join("\n"),
-          },
-        },
-      ],
-    }),
-  );
-
-  server.registerPrompt(
     "intern_work_on_site",
     {
       title: "Work on an Intern site",
       description: "Prepare, preview, validate, and publish one Intern site.",
       argsSchema: z.object({
-        site: completable(siteSlug, (value) => completeSiteSlugs(api, value)),
+        site: completable(siteSlugSchema(), (value) => completeSiteSlugs(api, value)),
       }),
     },
     ({ site }) => ({
@@ -481,7 +391,7 @@ export function buildServer(
             type: "text" as const,
             text: [
               `Work on Intern site "${site}".`,
-              "1. Call intern_auth_status. If unauthorized, follow the Intern sign-in flow first.",
+              "1. Call intern_auth_status. If unauthorized, ask the user to create a token at https://tryintern.dev/connect, run the setup command shown there, and restart the MCP host. Manual configurations instead update INTERN_ACCESS_TOKEN. Never ask them to paste the token into chat.",
               `2. Call intern_prepare_site with site "${site}". Edit files at the returned workspace.path using this host's filesystem tools.`,
               "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). Call it again after further edits. intern_stop_test stops the preview.",
               "4. Commit with this host's git, then call intern_validate_site.",
@@ -519,6 +429,10 @@ function result<T extends object>(value: T) {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent,
   };
+}
+
+function isAuthRequired(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("AUTH_REQUIRED:");
 }
 
 function jsonResource(uri: URL, value: object) {
