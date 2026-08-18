@@ -41,12 +41,10 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     expect(client.getInstructions()).toMatch(/never stages or commits/i);
 
     const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toEqual(
+    const toolNames = tools.tools.map((tool) => tool.name);
+    expect(toolNames).toEqual(
       expect.arrayContaining([
         "intern_auth_status",
-        "intern_login",
-        "intern_complete_login",
-        "intern_logout",
         "intern_list_sites",
         "intern_prepare_site",
         "intern_site_status",
@@ -56,6 +54,17 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
         "intern_publish_site",
       ]),
     );
+    expect(toolNames).not.toEqual(
+      expect.arrayContaining([
+        "intern_login",
+        "intern_complete_login",
+        "intern_logout",
+      ]),
+    );
+    expect(client.getInstructions()).toContain("INTERN_ACCESS_TOKEN");
+    expect(client.getInstructions()).toContain("intern-mcp launch");
+    expect(client.getInstructions()).toContain("rerunning setup");
+    expect(client.getInstructions()).toContain("https://tryintern.dev/connect");
     for (const tool of tools.tools) expect(tool.title, tool.name).toBeTruthy();
     const prepare = tools.tools.find((tool) => tool.name === "intern_prepare_site");
     expect(prepare?.inputSchema).toMatchObject({
@@ -70,9 +79,9 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     });
 
     const prompts = await client.listPrompts();
-    expect(prompts.prompts.map((prompt) => prompt.name)).toEqual(
-      expect.arrayContaining(["intern_sign_in", "intern_work_on_site"]),
-    );
+    const promptNames = prompts.prompts.map((prompt) => prompt.name);
+    expect(promptNames).toEqual(expect.arrayContaining(["intern_work_on_site"]));
+    expect(promptNames).not.toContain("intern_sign_in");
     const workflow = await client.getPrompt({
       name: "intern_work_on_site",
       arguments: { site: "docs" },
@@ -87,6 +96,35 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
       resources.resources.find((resource) => resource.uri === "intern://session")
         ?.description,
     ).toMatch(/does not include credentials/i);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("reports a configured but rejected access token as unauthorized", async () => {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = buildServer(
+    { hasCredentials: async () => true } as never,
+    {
+      session: async () => {
+        throw new Error("AUTH_REQUIRED: invalid_token");
+      },
+    } as never,
+    {} as never,
+  );
+  const client = new Client({ name: "intern-auth-contract", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const status = await client.callTool({
+      name: "intern_auth_status",
+      arguments: {},
+    });
+    expect(status.structuredContent).toEqual({
+      authorized: false,
+      setupURL: "https://tryintern.dev/connect",
+    });
   } finally {
     await client.close();
     await server.close();
@@ -466,37 +504,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   ).rejects.toThrow();
   expect(await previewTemporaryDirectories()).toEqual(concurrentTempsBefore);
 
-  // Logout removes an active preview before credentials are cleared.
-  const logoutTempsBefore = await previewTemporaryDirectories();
-  let markLogoutSiteListStarted = () => {};
-  const logoutSiteListStarted = new Promise<void>((resolve) => {
-    markLogoutSiteListStarted = resolve;
-  });
-  let releaseLogoutSiteList = () => {};
-  const logoutSiteListWait = new Promise<void>((resolve) => {
-    releaseLogoutSiteList = resolve;
-  });
-  blockedSiteList = { started: markLogoutSiteListStarted, wait: logoutSiteListWait };
-  const logoutTestPromise = client.callTool({
-    name: "intern_test_site",
-    arguments: { site: "docs" },
-  });
-  await logoutSiteListStarted;
-  const logoutPromise = client.callTool({ name: "intern_logout", arguments: {} });
-  releaseLogoutSiteList();
-  const [logoutTest] = await Promise.all([logoutTestPromise, logoutPromise]);
-  const logoutURL = (logoutTest.structuredContent as { test: { url: string } }).test
-    .url;
-  const logoutTemps = await previewTemporaryDirectories();
-  const logoutCreatedTemps = [...logoutTemps].filter(
-    (directory) => !logoutTempsBefore.has(directory),
-  );
-  expect(logoutCreatedTemps).toHaveLength(0);
-  await expect(
-    fetch(logoutURL, { signal: AbortSignal.timeout(1_000) }),
-  ).rejects.toThrow();
-
-  // Closing stdio stops previews that were not explicitly stopped. The test's environment token remains available after file-based logout.
+  // Closing stdio stops previews that were not explicitly stopped.
   const finalTempsBefore = await previewTemporaryDirectories();
   const finalTest = await client.callTool({
     name: "intern_test_site",

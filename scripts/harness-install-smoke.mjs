@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +15,7 @@ for (const variable of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME"]) {
   delete environment[variable];
 }
 const publicRegistry = "https://registry.npmjs.org";
+let sessionServer;
 
 async function run(command, args) {
   return exec(command, args, {
@@ -50,45 +52,79 @@ try {
   const [packed] = JSON.parse(stdout);
   if (!packed?.filename) throw new Error("npm pack did not return a tarball");
   const tarball = path.join(packDirectory, packed.filename);
-  const packagedCommand = [
-    "npx",
+  sessionServer = http.createServer((request, response) => {
+    if (
+      request.url !== "/api/v1/mcp/session" ||
+      request.headers.authorization !== "Bearer harness-proof-token"
+    ) {
+      response
+        .writeHead(401, { "content-type": "application/json" })
+        .end('{"error":"unauthorized"}');
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" }).end(
+      JSON.stringify({
+        user: {
+          id: "usr_harness",
+          org: "org_harness",
+          org_name: "Harness",
+          org_role: "admin",
+        },
+        org: { id: "intorg_harness", slug: "harness", state: "active" },
+      }),
+    );
+  });
+  await new Promise((resolve) => sessionServer.listen(0, "127.0.0.1", resolve));
+  const address = sessionServer.address();
+  if (!address || typeof address === "string") {
+    throw new Error("setup proof API did not bind TCP");
+  }
+  environment.INTERN_ACCESS_TOKEN = "harness-proof-token";
+  environment.INTERN_BASE_URL = `http://127.0.0.1:${address.port}`;
+  environment.INTERN_MCP_PACKAGE = tarball;
+  const setupCommand = [
     "--yes",
     `--@archastro:registry=${publicRegistry}`,
     `--package=${tarball}`,
     "intern-mcp",
-    "serve",
   ];
 
-  // Cross each harness's real configuration writer in an isolated home.
-  await run("codex", ["mcp", "add", "intern", "--", ...packagedCommand]);
+  // Cross the packaged setup command and each real host configuration writer.
+  const codexSetup = await run("npx", [...setupCommand, "setup", "--host", "codex"]);
+  if (!codexSetup.stdout.includes("Intern connected to Codex as Harness · admin")) {
+    throw new Error("packaged setup did not validate and configure Codex");
+  }
   const codex = await run("codex", ["mcp", "get", "intern"]);
-  if (!codex.stdout.includes("intern-mcp") || !codex.stdout.includes("serve")) {
-    throw new Error("Codex did not persist the packaged Intern MCP command");
+  if (
+    !codex.stdout.includes("intern-mcp") ||
+    !codex.stdout.includes("launch") ||
+    codex.stdout.includes("harness-proof-token")
+  ) {
+    throw new Error("Codex did not persist the packaged Intern MCP profile launcher");
   }
 
-  await run("claude", [
-    "mcp",
-    "add",
-    "--transport",
-    "stdio",
-    "--scope",
-    "user",
-    "intern",
-    "--",
-    ...packagedCommand,
-  ]);
+  const claudeSetup = await run("npx", [...setupCommand, "setup", "--host", "claude"]);
+  if (
+    !claudeSetup.stdout.includes("Intern connected to Claude Code as Harness · admin")
+  ) {
+    throw new Error("packaged setup did not validate and configure Claude Code");
+  }
   const claude = await run("claude", ["mcp", "get", "intern"]);
   if (
     !claude.stdout.includes("intern-mcp") ||
-    !claude.stdout.includes("serve") ||
+    !claude.stdout.includes("launch") ||
+    claude.stdout.includes("harness-proof-token") ||
     !claude.stdout.includes("Connected")
   ) {
     throw new Error("Claude did not connect to the packaged Intern MCP command");
   }
 
   process.stdout.write(
-    `Codex registered and Claude connected to ${packed.filename} from isolated homes.\n`,
+    `Packaged setup validated Intern and configured Codex and Claude for ${packed.filename} in isolated homes.\n`,
   );
 } finally {
+  if (sessionServer) {
+    await new Promise((resolve) => sessionServer.close(() => resolve()));
+  }
   await fs.rm(temporary, { recursive: true, force: true });
 }
