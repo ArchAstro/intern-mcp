@@ -6,7 +6,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { InternSite, SiteRuntimeContract } from "./api.js";
+import {
+  isAcceptedProtectedFile,
+  type InternSite,
+  type SiteRuntimeContract,
+} from "./api.js";
 
 const exec = promisify(execFile);
 
@@ -117,12 +121,14 @@ export async function validateSite(
           ),
         );
     }
-    for (const [name, expected] of Object.entries(contract.protectedFiles)) {
+    for (const name of Object.keys(contract.protectedFiles)) {
       const actual = await fs
         .readFile(path.join(checkout, name), "utf8")
         .catch(() => null);
-      const rendered = expected.replaceAll("{{PORT}}", String(site.port));
-      if (actual !== null && actual !== rendered) {
+      if (
+        actual !== null &&
+        !isAcceptedProtectedFile(name, actual, contract, site.port)
+      ) {
         issues.push(
           error(
             "protected_file_changed",
@@ -265,6 +271,106 @@ async function smokeTest(
     await fs.rm(sandbox, { recursive: true, force: true });
   }
   return { started: Boolean(running), http: Boolean(running), issues };
+}
+
+export async function runLocalSiteBuild(root: string): Promise<ValidationIssue[]> {
+  const packagePath = path.join(root, "package.json");
+  let packageJSON: Record<string, unknown>;
+  try {
+    packageJSON = JSON.parse(await fs.readFile(packagePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    return [];
+  }
+  const runtimeDependencies = [
+    "dependencies",
+    "optionalDependencies",
+    "peerDependencies",
+  ].flatMap((field) => Object.keys(asRecord(packageJSON[field])));
+  if (runtimeDependencies.length > 0) return [];
+  const installable = Object.keys({
+    ...asRecord(packageJSON.dependencies),
+    ...asRecord(packageJSON.devDependencies),
+    ...asRecord(packageJSON.optionalDependencies),
+  });
+  const npmEnvironment = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.startsWith("npm_")),
+    ),
+    HOME: root,
+    npm_config_update_notifier: "false",
+    npm_config_fund: "false",
+    npm_config_audit: "false",
+  };
+  if (installable.length > 0) {
+    const lockExists = await fs
+      .stat(path.join(root, "package-lock.json"))
+      .then((info) => info.isFile())
+      .catch(() => false);
+    try {
+      await exec(
+        "npm",
+        [lockExists ? "ci" : "install", "--ignore-scripts", "--no-audit", "--no-fund"],
+        {
+          cwd: root,
+          timeout: 120_000,
+          maxBuffer: 4 * 1024 * 1024,
+          env: npmEnvironment,
+        },
+      );
+    } catch (cause) {
+      return [
+        error(
+          "local_package_install_failed",
+          `Local package install failed: ${message(cause)}`,
+          "package.json",
+        ),
+      ];
+    }
+  }
+  if (typeof asRecord(packageJSON.scripts).build !== "string") return [];
+  try {
+    await exec("npm", ["run", "build"], {
+      cwd: root,
+      timeout: 120_000,
+      maxBuffer: 4 * 1024 * 1024,
+      env: npmEnvironment,
+    });
+  } catch (cause) {
+    return [
+      error(
+        "local_build_failed",
+        `Local site build failed: ${message(cause)}`,
+        "package.json",
+      ),
+    ];
+  }
+  return [];
+}
+
+export async function missingCommittedBuildOutput(
+  root: string,
+): Promise<ValidationIssue | undefined> {
+  let packageJSON: Record<string, unknown>;
+  try {
+    packageJSON = JSON.parse(
+      await fs.readFile(path.join(root, "package.json"), "utf8"),
+    ) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (typeof asRecord(packageJSON.scripts).build !== "string") return undefined;
+  const distIndex = await fs
+    .stat(path.join(root, "dist", "index.html"))
+    .catch(() => null);
+  if (distIndex?.isFile()) return undefined;
+  return error(
+    "build_output_missing",
+    "This site has a local build script. intern_test_site writes dist/; commit dist/ before validate or publish.",
+    "dist/index.html",
+  );
 }
 
 export async function startSiteRuntime(

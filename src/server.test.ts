@@ -502,7 +502,10 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await expect(
     fetch(concurrentURL, { signal: AbortSignal.timeout(1_000) }),
   ).rejects.toThrow();
-  expect(await previewTemporaryDirectories()).toEqual(concurrentTempsBefore);
+  const leftoverPreviewTemps = [...(await previewTemporaryDirectories())].filter(
+    (directory) => !concurrentTempsBefore.has(directory),
+  );
+  expect(leftoverPreviewTemps).toEqual([]);
 
   // Closing stdio stops previews that were not explicitly stopped.
   const finalTempsBefore = await previewTemporaryDirectories();

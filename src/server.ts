@@ -21,9 +21,9 @@ const SERVER_INSTRUCTIONS = [
   "Authentication comes from the mode-0600 profile used by intern-mcp launch, or from INTERN_ACCESS_TOKEN in a manual stdio configuration. If it is missing, ask the user to create a profile token at https://tryintern.dev/connect and run the setup command shown there. Never ask the user to paste a token into chat or a tool call.",
   "1. intern_auth_status — confirm the configured token resolves to the expected user and organization.",
   "2. intern_prepare_site — clone or reuse the checkout; edit files at the returned absolute path with the host's filesystem tools.",
-  "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. Call it again after further edits. intern_stop_test stops it.",
-  "4. Commit with the host's git, then intern_validate_site against Intern's runtime contract.",
-  "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation.",
+  "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. It skips deleted tracked files, upgrades Intern-owned runtime files, installs devDependencies locally, runs the site build script when present, and writes dist/ into the checkout. Call it again after further edits. intern_stop_test stops it.",
+  "4. Commit with the host's git, including dist/ when intern_test_site wrote it, then intern_validate_site against Intern's runtime contract.",
+  "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation. The tenant does not install packages or build.",
   "Use intern_list_sites and intern_site_status to inspect. Setup users rotate access by rerunning setup and restarting the host; manual users update INTERN_ACCESS_TOKEN and restart it.",
 ].join("\n");
 
@@ -179,12 +179,9 @@ export function buildServer(
         throw new Error(
           `Intern site not found: ${slug}; set createIfMissing only if it should be created`,
         );
-      const workspace = await workspaces.prepare(session.org.slug, site);
-      const validation = await workspaces.validate(
-        session.org.slug,
-        site,
-        await api.runtimeContract(),
-      );
+      const contract = await api.runtimeContract();
+      const workspace = await workspaces.prepare(session.org.slug, site, contract);
+      const validation = await workspaces.validate(session.org.slug, site, contract);
       return result({ site, workspace, validation });
     },
   );
@@ -212,7 +209,7 @@ export function buildServer(
     {
       title: "Validate Intern commit",
       description:
-        "Validate the prepared checkout's committed HEAD against Intern's authenticated runtime contract. Checks required and protected files, package support, entrypoint syntax, sandboxed startup, and an HTTP response without changing the checkout. Commit model edits first; dirty changes are reported in workspace status but are not part of validation.",
+        "Validate the prepared checkout's committed HEAD against Intern's authenticated runtime contract. Checks required and protected files, package support, a committed dist/ when the site has a build script, entrypoint syntax, sandboxed startup, and an HTTP response without changing the checkout. Commit model edits first, including dist/ written by intern_test_site; dirty changes are reported in workspace status but are not part of validation.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -233,6 +230,7 @@ export function buildServer(
         session.org.slug,
         site,
         await api.runtimeContract(),
+        { requireBuildOutput: true },
       );
       return result({ site, workspace, validation });
     },
@@ -243,7 +241,7 @@ export function buildServer(
     {
       title: "Preview Intern working tree",
       description:
-        "Validate the current working tree, replace any prior preview for this site, and serve a temporary snapshot at a loopback HTTP URL. This includes uncommitted tracked and untracked files but excludes ignored files; call it again after edits to refresh the snapshot.",
+        "Validate the current working tree, replace any prior preview for this site, and serve a temporary snapshot at a loopback HTTP URL. Includes uncommitted tracked and untracked files, excludes ignored files, and skips tracked files deleted on disk. Installs devDependencies locally, runs the site build script when present, and writes dist/ plus Intern-owned runtime upgrades into the checkout so they can be committed. Call it again after edits to refresh the snapshot.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -295,7 +293,7 @@ export function buildServer(
     {
       title: "Publish Intern site",
       description:
-        "Validate and push the clean, committed HEAD of a prepared Intern checkout. Refuses runtime-incompatible changes, dirty trees, detached HEADs, unexpected remotes, and non-fast-forward pushes.",
+        "Validate and push the clean, committed HEAD of a prepared Intern checkout. Refuses runtime-incompatible changes, missing committed build output when the site has a build script, dirty trees, detached HEADs, unexpected remotes, and non-fast-forward pushes. The tenant serves the committed tree and does not install or build.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -393,8 +391,8 @@ export function buildServer(
               `Work on Intern site "${site}".`,
               "1. Call intern_auth_status. If unauthorized, ask the user to create a token at https://tryintern.dev/connect, run the setup command shown there, and restart the MCP host. Manual configurations instead update INTERN_ACCESS_TOKEN. Never ask them to paste the token into chat.",
               `2. Call intern_prepare_site with site "${site}". Edit files at the returned workspace.path using this host's filesystem tools.`,
-              "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). Call it again after further edits. intern_stop_test stops the preview.",
-              "4. Commit with this host's git, then call intern_validate_site.",
+              "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). It runs the local install and build, writes dist/ into the checkout, and skips deleted tracked files. Call it again after further edits. intern_stop_test stops the preview.",
+              "4. Commit with this host's git, including any dist/ intern_test_site wrote, then call intern_validate_site.",
               "5. Call intern_publish_site only when validation is valid and the worktree is clean.",
             ].join("\n"),
           },

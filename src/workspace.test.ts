@@ -5,7 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "vitest";
-import type { InternSite, SiteRuntimeContract } from "./api.js";
+import {
+  previousProtectedV1Files,
+  renderProtectedFile,
+  type InternSite,
+  type SiteRuntimeContract,
+} from "./api.js";
 import { WorkspaceManager } from "./workspace.js";
 import type { SSHCredentialManager } from "./ssh.js";
 
@@ -183,6 +188,121 @@ describe("WorkspaceManager", () => {
     await expect(manager.publish("acme", site, contract)).rejects.toThrow(
       "VALIDATION_FAILED",
     );
+  });
+
+  test("previews a mid-refactor Vite tree, serves svg, and requires a committed dist on publish", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-preview-"));
+    roots.push(root);
+    const remote = path.join(root, "remote.git");
+    const seed = path.join(root, "seed");
+    const previousServer = previousProtectedV1Files["server.mjs"][0];
+    if (!previousServer) throw new Error("missing previous server.mjs template");
+    await exec("git", ["init", "--bare", remote]);
+    await exec("git", ["clone", remote, seed]);
+    await exec("git", ["config", "user.email", "proof@localhost"], { cwd: seed });
+    await exec("git", ["config", "user.name", "Proof"], { cwd: seed });
+    await fs.writeFile(path.join(seed, "index.html"), "source root\n");
+    await fs.writeFile(
+      path.join(seed, "package.json"),
+      `${JSON.stringify({
+        private: true,
+        type: "module",
+        scripts: { build: "node build.mjs" },
+      })}\n`,
+    );
+    await fs.writeFile(
+      path.join(seed, "build.mjs"),
+      [
+        'import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";',
+        'mkdirSync("dist", { recursive: true });',
+        'writeFileSync("dist/index.html", "built page\\n");',
+        'if (existsSync("icon.svg")) copyFileSync("icon.svg", "dist/icon.svg");',
+        "",
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      path.join(seed, "server.mjs"),
+      renderProtectedFile(previousServer, 4100),
+    );
+    await fs.writeFile(path.join(seed, "run-site.sh"), launcher, { mode: 0o750 });
+    await fs.mkdir(path.join(seed, "src"));
+    await fs.writeFile(path.join(seed, "src/main.js"), "export const ready = true;\n");
+    await exec("git", ["add", "."], { cwd: seed });
+    await exec("git", ["commit", "-m", "seed previous runtime and source"], {
+      cwd: seed,
+    });
+    await exec("git", ["push", "origin", "HEAD:main"], { cwd: seed });
+    await exec("git", ["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: remote });
+
+    const manager = new WorkspaceManager({
+      internBaseURL: "",
+      archAstroBaseURL: "",
+      workspaceRoot: path.join(root, "workspaces"),
+      configRoot: path.join(root, "config"),
+    });
+    const site = {
+      slug: "docs",
+      orgSlug: "acme",
+      siteType: "vite",
+      port: 4100,
+      gitUrl: remote,
+    } as InternSite;
+
+    // Prepare upgrades the previous protected server in the checkout so the
+    // next commit can pick up MIME and dist-root serving. HEAD stays grandfathered.
+    const prepared = await manager.prepare("acme", site, contract);
+    expect(await fs.readFile(path.join(prepared.path, "server.mjs"), "utf8")).toBe(
+      renderProtectedFile(contract.protectedFiles["server.mjs"], 4100),
+    );
+    const headValidation = await manager.validate("acme", site, contract);
+    expect(headValidation.valid).toBe(true);
+    expect(
+      await manager.validate("acme", site, contract, { requireBuildOutput: true }),
+    ).toMatchObject({
+      valid: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({ code: "build_output_missing" }),
+      ]),
+    });
+
+    // Mid-refactor: tracked src/ is gone on disk but still in HEAD.
+    await fs.rm(path.join(prepared.path, "src"), { recursive: true, force: true });
+    await fs.writeFile(
+      path.join(prepared.path, "icon.svg"),
+      "<svg xmlns='http://www.w3.org/2000/svg'/>\n",
+    );
+
+    const preview = await manager.testWorkingTree("acme", site, contract);
+    expect(preview.test).toMatchObject({ running: true, source: "working-tree" });
+    if (!preview.test.running) throw new Error("expected local preview to start");
+    try {
+      const svg = await fetch(new URL("/icon.svg", preview.test.url));
+      expect(svg.status).toBe(200);
+      expect(svg.headers.get("content-type")).toBe("image/svg+xml");
+      expect(await (await fetch(preview.test.url)).text()).toBe("built page\n");
+    } finally {
+      await manager.stopTestBySlug("docs");
+    }
+    expect(await fs.readFile(path.join(prepared.path, "dist/index.html"), "utf8")).toBe(
+      "built page\n",
+    );
+
+    await exec("git", ["config", "user.email", "proof@localhost"], {
+      cwd: prepared.path,
+    });
+    await exec("git", ["config", "user.name", "Proof"], { cwd: prepared.path });
+    await exec("git", ["add", "-A"], { cwd: prepared.path });
+    await exec("git", ["commit", "-m", "commit local vite bundle"], {
+      cwd: prepared.path,
+    });
+    const published = await manager.publish("acme", site, contract);
+    expect(published.validation.valid).toBe(true);
+    const remoteDist = await exec("git", [
+      `--git-dir=${remote}`,
+      "show",
+      "main:dist/index.html",
+    ]);
+    expect(remoteDist.stdout).toBe("built page\n");
   });
 
   test("rejects invalid slugs before resolving a path", async () => {
