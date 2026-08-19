@@ -1,7 +1,13 @@
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import { InternAPI, parseSiteRuntimeContract } from "./api.js";
+import {
+  InternAPI,
+  isAcceptedProtectedFile,
+  parseSiteRuntimeContract,
+  previousProtectedV1Files,
+  renderProtectedFile,
+} from "./api.js";
 
 const canonical = JSON.parse(
   await fs.readFile(
@@ -26,6 +32,23 @@ describe("Intern runtime contract parsing", () => {
     expect(() => parseSiteRuntimeContract(altered)).toThrow(
       "unexpected protected content",
     );
+  });
+
+  test("accepts the previous v1 server as a grandfathered checkout file", () => {
+    const contract = parseSiteRuntimeContract(canonical);
+    const previous = renderProtectedFile(
+      previousProtectedV1Files["server.mjs"][0],
+      4100,
+    );
+    expect(isAcceptedProtectedFile("server.mjs", previous, contract, 4100)).toBe(true);
+    expect(
+      isAcceptedProtectedFile(
+        "server.mjs",
+        'console.log("not the v1 runtime")\n',
+        contract,
+        4100,
+      ),
+    ).toBe(false);
   });
 
   test("rejects missing protected files and changed required-file semantics", () => {

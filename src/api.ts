@@ -81,8 +81,32 @@ const siteRuntimeContractSchema: z.ZodType<SiteRuntimeContract> = z
 
 const protectedV1Hashes: Record<string, string> = {
   "run-site.sh": "3db0608bf5d67284d33302d78883eee91a849c69f5ece96f7c29a6c31c56bfbd",
-  "server.mjs": "93080da2f54e8e8d28feb6f6039edf0b9a959b1b4c446d51a6fe1e18b38a783c",
+  "server.mjs": "309b27641e52ac0f4c3a7369c072766aa8ae0fa9db85f93a2e5d0a19506d624c",
 };
+
+/** Earlier intern-node-static-v1 protected files that existing site commits may still contain. */
+export const previousProtectedV1Files: Record<string, string[]> = {
+  "server.mjs": [
+    'import {createServer} from "node:http"; import {readFile} from "node:fs/promises"; import {extname,join} from "node:path"; const root=process.cwd(); const port=Number(process.env.PORT || {{PORT}}); const types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8"}; createServer(async (req,res)=>{try{const raw=(req.url||"/").split("?")[0]; const rel=raw==="/"?"index.html":raw.replace(/^\\/+/,""); if(rel.includes("..")) throw new Error("bad path"); const body=await readFile(join(root,rel)); res.writeHead(200,{"content-type":types[extname(rel)]||"application/octet-stream"}); res.end(body)}catch{res.writeHead(404);res.end("not found")}}).listen(port,"127.0.0.1");\n',
+  ],
+};
+
+export function renderProtectedFile(template: string, port: number): string {
+  return template.replaceAll("{{PORT}}", String(port));
+}
+
+export function isAcceptedProtectedFile(
+  name: string,
+  actual: string,
+  contract: SiteRuntimeContract,
+  port: number,
+): boolean {
+  const expected = renderProtectedFile(contract.protectedFiles[name] ?? "", port);
+  if (actual === expected) return true;
+  return (previousProtectedV1Files[name] ?? []).some(
+    (template) => renderProtectedFile(template, port) === actual,
+  );
+}
 
 export function parseSiteRuntimeContract(value: unknown): SiteRuntimeContract {
   const contract = siteRuntimeContractSchema.parse(value);

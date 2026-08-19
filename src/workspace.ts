@@ -6,12 +6,20 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { InternConfig } from "./config.js";
-import type { InternSite, SiteRuntimeContract } from "./api.js";
 import {
+  isAcceptedProtectedFile,
+  renderProtectedFile,
+  type InternSite,
+  type SiteRuntimeContract,
+} from "./api.js";
+import {
+  missingCommittedBuildOutput,
+  runLocalSiteBuild,
   startSiteRuntime,
   validateSite,
   type RunningSiteRuntime,
   type SiteValidation,
+  type ValidationIssue,
 } from "./validation.js";
 import type { SSHCredentialManager } from "./ssh.js";
 
@@ -70,7 +78,11 @@ export class WorkspaceManager {
     private readonly ssh?: SSHCredentialManager,
   ) {}
 
-  async prepare(orgSlug: string, site: InternSite): Promise<WorkspaceStatus> {
+  async prepare(
+    orgSlug: string,
+    site: InternSite,
+    contract?: SiteRuntimeContract,
+  ): Promise<WorkspaceStatus> {
     const checkout = this.checkoutPath(orgSlug, site.slug);
     await fs.mkdir(path.dirname(checkout), { recursive: true });
     await this.assertContained(path.dirname(checkout));
@@ -92,7 +104,15 @@ export class WorkspaceManager {
     if (!sameRemote(status.remote, site.gitUrl)) {
       throw new Error(`workspace remote does not match Intern site: ${status.remote}`);
     }
-    return status;
+    if (!contract) return status;
+    const anchor = await this.openCheckoutAnchor(checkout);
+    try {
+      await this.assertCheckoutAnchor(checkout, anchor);
+      await this.syncRuntimeAndBuild(checkout, site, contract, anchor);
+    } finally {
+      await anchor.handle.close();
+    }
+    return this.status(orgSlug, site.slug);
   }
 
   async status(orgSlug: string, siteSlug: string): Promise<WorkspaceStatus> {
@@ -131,6 +151,7 @@ export class WorkspaceManager {
     orgSlug: string,
     site: InternSite,
     contract: SiteRuntimeContract,
+    options: { requireBuildOutput?: boolean } = {},
   ): Promise<SiteValidation> {
     const status = await this.status(orgSlug, site.slug);
     if (
@@ -141,7 +162,7 @@ export class WorkspaceManager {
         "refusing to validate a checkout with an unexpected Intern remote",
       );
     }
-    return this.validateCommit(status.path, status.head, site, contract);
+    return this.validateCommit(status.path, status.head, site, contract, options);
   }
 
   async publish(
@@ -164,6 +185,7 @@ export class WorkspaceManager {
       before.head,
       site,
       contract,
+      { requireBuildOutput: true },
     );
     if (!validation.valid) {
       throw new Error(
@@ -225,14 +247,26 @@ export class WorkspaceManager {
         try {
           await fs.mkdir(snapshot);
           await this.copyWorkingTree(workspace.path, snapshot, anchor);
+          const buildIssues = await this.syncRuntimeAndBuild(
+            workspace.path,
+            site,
+            contract,
+            anchor,
+            snapshot,
+          );
+          const workspaceAfter = await this.status(orgSlug, site.slug);
           const validation = await validateSite(snapshot, site, contract);
+          if (buildIssues.length > 0) {
+            validation.valid = false;
+            validation.issues.push(...buildIssues);
+          }
           if (!validation.valid) {
             await fs.rm(temporary, { recursive: true, force: true });
             return {
-              workspace,
+              workspace: workspaceAfter,
               test: {
                 running: false,
-                testedHead: workspace.head,
+                testedHead: workspaceAfter.head,
                 source: "working-tree",
                 validation,
               },
@@ -247,11 +281,11 @@ export class WorkspaceManager {
             }
             this.localTests.set(key, { runtime, temporary });
             return {
-              workspace,
+              workspace: workspaceAfter,
               test: {
                 running: true,
                 url: runtime.url,
-                testedHead: workspace.head,
+                testedHead: workspaceAfter.head,
                 source: "working-tree",
                 validation,
               },
@@ -267,10 +301,10 @@ export class WorkspaceManager {
             });
             await fs.rm(temporary, { recursive: true, force: true });
             return {
-              workspace,
+              workspace: workspaceAfter,
               test: {
                 running: false,
-                testedHead: workspace.head,
+                testedHead: workspaceAfter.head,
                 source: "working-tree",
                 validation,
               },
@@ -392,6 +426,7 @@ export class WorkspaceManager {
     head: string,
     site: InternSite,
     contract: SiteRuntimeContract,
+    options: { requireBuildOutput?: boolean } = {},
   ): Promise<SiteValidation> {
     const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-commit-"));
     const archive = path.join(temporary, "site.tar");
@@ -410,9 +445,100 @@ export class WorkspaceManager {
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
       });
-      return await validateSite(snapshot, site, contract);
+      const validation = await validateSite(snapshot, site, contract);
+      if (options.requireBuildOutput) {
+        const issue = await missingCommittedBuildOutput(snapshot);
+        if (issue) {
+          validation.valid = false;
+          validation.issues.push(issue);
+        }
+      }
+      return validation;
     } finally {
       await fs.rm(temporary, { recursive: true, force: true });
+    }
+  }
+
+  private async syncRuntimeAndBuild(
+    checkout: string,
+    site: InternSite,
+    contract: SiteRuntimeContract,
+    anchor: CheckoutAnchor,
+    existingSnapshot?: string,
+  ): Promise<ValidationIssue[]> {
+    let temporary: string | undefined;
+    const snapshot =
+      existingSnapshot ??
+      path.join(
+        (temporary = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-build-")),
+        )),
+        "site",
+      );
+    try {
+      if (!existingSnapshot) {
+        await fs.mkdir(snapshot);
+        await this.copyWorkingTree(checkout, snapshot, anchor);
+      }
+      await this.upgradeProtectedFiles(snapshot, checkout, site, contract);
+      const issues = await runLocalSiteBuild(snapshot);
+      if (issues.length === 0) {
+        await this.materializeGeneratedFiles(snapshot, checkout);
+      }
+      return issues;
+    } finally {
+      if (temporary) await fs.rm(temporary, { recursive: true, force: true });
+    }
+  }
+
+  private async upgradeProtectedFiles(
+    snapshot: string,
+    checkout: string,
+    site: InternSite,
+    contract: SiteRuntimeContract,
+  ): Promise<void> {
+    for (const [name, template] of Object.entries(contract.protectedFiles)) {
+      const current = renderProtectedFile(template, site.port);
+      const snapshotPath = path.join(snapshot, name);
+      const actual = await fs.readFile(snapshotPath, "utf8").catch(() => null);
+      if (actual === null || actual === current) continue;
+      if (!isAcceptedProtectedFile(name, actual, contract, site.port)) continue;
+      await fs.writeFile(snapshotPath, current, {
+        mode: name === "run-site.sh" ? 0o750 : 0o644,
+      });
+      const checkoutPath = path.join(checkout, name);
+      const checkoutActual = await fs.readFile(checkoutPath, "utf8").catch(() => null);
+      if (checkoutActual === actual) {
+        await fs.writeFile(checkoutPath, current, {
+          mode: name === "run-site.sh" ? 0o750 : 0o644,
+        });
+      }
+    }
+  }
+
+  private async materializeGeneratedFiles(
+    snapshot: string,
+    checkout: string,
+  ): Promise<void> {
+    const dist = path.join(snapshot, "dist");
+    if (
+      await fs
+        .stat(dist)
+        .then((info) => info.isDirectory())
+        .catch(() => false)
+    ) {
+      const destination = path.join(checkout, "dist");
+      await fs.rm(destination, { recursive: true, force: true });
+      await fs.cp(dist, destination, { recursive: true });
+    }
+    const lock = path.join(snapshot, "package-lock.json");
+    if (
+      await fs
+        .stat(lock)
+        .then((info) => info.isFile())
+        .catch(() => false)
+    ) {
+      await fs.copyFile(lock, path.join(checkout, "package-lock.json"));
     }
   }
 
@@ -438,9 +564,9 @@ export class WorkspaceManager {
       const relative = path.relative(checkout, source);
       if (!relative || relative.startsWith("..") || path.isAbsolute(relative))
         throw new Error("VALIDATION_FAILED: unsafe working-tree path");
-      await this.assertNoSymlinkedParents(checkout, relative);
       const info = await fs.lstat(source).catch(() => null);
       if (!info) continue;
+      await this.assertNoSymlinkedParents(checkout, relative);
       const destination = path.join(snapshot, relative);
       await fs.mkdir(path.dirname(destination), { recursive: true });
       if (info.isSymbolicLink()) {
