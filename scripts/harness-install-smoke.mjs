@@ -154,8 +154,37 @@ try {
     throw new Error("Claude did not connect to the packaged Intern MCP command");
   }
 
+  for (const host of ["cursor", "opencode", "rovodev", "pi"]) {
+    const setup = await run("npx", [
+      ...setupCommand,
+      "setup",
+      "--host",
+      host,
+      "--registry",
+      publicRegistry,
+    ]);
+    if (!setup.stdout.includes("Intern connected to")) {
+      throw new Error(`packaged setup did not configure ${host}`);
+    }
+    if (setup.stdout.includes("harness-proof-token")) {
+      throw new Error(`${host} setup printed the access token`);
+    }
+  }
+  const cursor = JSON.parse(
+    await fs.readFile(path.join(isolatedHome, ".cursor/mcp.json"), "utf8"),
+  );
+  if (!JSON.stringify(cursor.mcpServers.intern.args).includes("launch")) {
+    throw new Error("Cursor setup did not persist the Intern launcher");
+  }
+  const pi = JSON.parse(
+    await fs.readFile(path.join(isolatedHome, ".config/mcp/mcp.json"), "utf8"),
+  );
+  if (pi.mcpServers.intern.command !== "npx") {
+    throw new Error("Pi setup did not write the shared MCP config");
+  }
+
   process.stdout.write(
-    `Packaged setup validated Intern and configured Codex and Claude for ${packed.filename} in isolated homes.\n`,
+    `Packaged setup validated Intern and configured Codex, Claude, Cursor, OpenCode, Rovo Dev, and Pi for ${packed.filename} in isolated homes.\n`,
   );
 } finally {
   if (sessionServer) {
