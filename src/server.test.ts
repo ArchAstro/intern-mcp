@@ -131,10 +131,17 @@ test("reports a configured but rejected access token as unauthorized", async () 
   }
 });
 
-async function previewTemporaryDirectories(): Promise<Set<string>> {
-  const temporaryRoot = await fs.realpath(os.tmpdir());
+async function previewTemporaryDirectories(
+  temporaryRoot: string,
+): Promise<Set<string>> {
+  const entries = await fs
+    .readdir(temporaryRoot)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
   return new Set(
-    (await fs.readdir(temporaryRoot))
+    entries
       .filter((name) => name.startsWith("intern-mcp-test-"))
       .map((name) => path.join(temporaryRoot, name)),
   );
@@ -223,6 +230,10 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   if (!address || typeof address === "string")
     throw new Error("test backend did not bind TCP");
 
+  const previewTmp = await fs.realpath(
+    await fs.mkdtemp(path.join(root, "preview-tmp-")),
+  );
+
   // Cross the real stdio MCP boundary and obtain the guarded checkout path.
   const entry = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -233,6 +244,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     args: [entry, "serve"],
     env: {
       ...process.env,
+      TMPDIR: previewTmp,
       INTERN_BASE_URL: `http://127.0.0.1:${address.port}`,
       INTERN_ACCESS_TOKEN: "authorized-proof-token",
       INTERN_WORKSPACE_ROOT: path.join(root, "workspaces"),
@@ -273,7 +285,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   });
 
   // Test tracked and untracked model edits without leaking ignored files or mutating the checkout.
-  const previewTempsBefore = await previewTemporaryDirectories();
+  const previewTempsBefore = await previewTemporaryDirectories(previewTmp);
   await fs.writeFile(
     path.join(structured.workspace.path, "index.html"),
     "uncommitted local preview\n",
@@ -323,7 +335,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   expect((await fetch(new URL("/ignored.txt", localTestResult.test.url))).status).toBe(
     404,
   );
-  const previewTempsDuring = await previewTemporaryDirectories();
+  const previewTempsDuring = await previewTemporaryDirectories(previewTmp);
   const createdPreviewTemps = [...previewTempsDuring].filter(
     (directory) => !previewTempsBefore.has(directory),
   );
@@ -341,7 +353,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   const refreshedURL = (refreshed.structuredContent as { test: { url: string } }).test
     .url;
   expect(await (await fetch(refreshedURL)).text()).toBe("refreshed local preview\n");
-  const refreshedPreviewTemps = await previewTemporaryDirectories();
+  const refreshedPreviewTemps = await previewTemporaryDirectories(previewTmp);
   const refreshedCreatedTemps = [...refreshedPreviewTemps].filter(
     (directory) => !previewTempsBefore.has(directory),
   );
@@ -481,7 +493,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     releaseSiteList = resolve;
   });
   blockedSiteList = { started: markSiteListStarted, wait: siteListWait };
-  const concurrentTempsBefore = await previewTemporaryDirectories();
+  const concurrentTempsBefore = await previewTemporaryDirectories(previewTmp);
   const concurrentTestPromise = client.callTool({
     name: "intern_test_site",
     arguments: { site: "docs" },
@@ -502,20 +514,20 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await expect(
     fetch(concurrentURL, { signal: AbortSignal.timeout(1_000) }),
   ).rejects.toThrow();
-  const leftoverPreviewTemps = [...(await previewTemporaryDirectories())].filter(
-    (directory) => !concurrentTempsBefore.has(directory),
-  );
+  const leftoverPreviewTemps = [
+    ...(await previewTemporaryDirectories(previewTmp)),
+  ].filter((directory) => !concurrentTempsBefore.has(directory));
   expect(leftoverPreviewTemps).toEqual([]);
 
   // Closing stdio stops previews that were not explicitly stopped.
-  const finalTempsBefore = await previewTemporaryDirectories();
+  const finalTempsBefore = await previewTemporaryDirectories(previewTmp);
   const finalTest = await client.callTool({
     name: "intern_test_site",
     arguments: { site: "docs" },
   });
   const finalURL = (finalTest.structuredContent as { test: { url: string } }).test.url;
   expect(await fetch(finalURL)).toMatchObject({ status: 200 });
-  const finalTempsDuring = await previewTemporaryDirectories();
+  const finalTempsDuring = await previewTemporaryDirectories(previewTmp);
   const finalCreatedTemps = [...finalTempsDuring].filter(
     (directory) => !finalTempsBefore.has(directory),
   );
