@@ -11,7 +11,7 @@ It requires Node.js 22 or newer.
 ### Codex
 
 ```sh
-npx --yes @archastro/intern-mcp@0.1.0 setup --host codex
+npx --yes @archastro/intern-mcp@latest setup --host codex
 ```
 
 Restart Codex after adding the server. Codex stores the stdio command in its
@@ -20,7 +20,7 @@ user configuration and starts the package when a session needs the server.
 ### Claude Code
 
 ```sh
-npx --yes @archastro/intern-mcp@0.1.0 setup --host claude
+npx --yes @archastro/intern-mcp@latest setup --host claude
 ```
 
 Add `--verbose` to either setup command to print redacted request lifecycle
@@ -47,10 +47,12 @@ setup with a new token, restart the host, and revoke the old token on the
 Connect page. Revocation blocks new API calls and SSH certificates immediately;
 a Git certificate already issued can remain valid until its five-minute expiry.
 
-Upgrades are explicit: rerun the corresponding setup command with the reviewed
-version replacing `0.1.0`. The installer updates only the user-level `intern`
-registration. The host never executes a newly published package version merely
-because it restarted.
+The setup command resolves npm's stable `latest` release and saves a launcher
+that checks that channel whenever the MCP host starts. The saved launcher uses
+`--prefer-online` to refresh stale package metadata instead of trusting its npx
+cache; the one-time setup command does not expose that runtime policy. To pin a
+reviewed build instead, run setup with `INTERN_MCP_PACKAGE` set to a complete
+package spec such as `@archastro/intern-mcp@0.1.1`, or to a package tarball.
 
 The repository is private; the package is public on npm.
 
@@ -59,8 +61,13 @@ that local mapping for this public package:
 
 ```sh
 npx --yes --@archastro:registry=https://registry.npmjs.org \
-  @archastro/intern-mcp@0.1.0 setup --host codex
+  @archastro/intern-mcp@latest setup --host codex \
+  --registry https://registry.npmjs.org
 ```
+
+The first registry option lets npx find the setup executable. The setup
+`--registry` option saves the same scoped override in the Codex or Claude
+launcher so later host restarts continue resolving the public package.
 
 Maintainers run the manual **release** workflow from `main` and choose a patch,
 minor, or major bump. It verifies the package, commits the version change on a

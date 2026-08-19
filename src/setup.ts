@@ -12,7 +12,7 @@ import type { InternSession } from "./api.js";
 import { PACKAGE_VERSION, type InternConfig } from "./config.js";
 
 const exec = promisify(execFile);
-const defaultPackage = `@archastro/intern-mcp@${PACKAGE_VERSION}`;
+const defaultPackage = "@archastro/intern-mcp@latest";
 
 export type SetupHost = "codex" | "claude";
 
@@ -40,6 +40,7 @@ interface SetupDependencies {
   write?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
   verbose?: boolean;
+  registry?: string;
 }
 
 class HostConfigurationCommittedError extends Error {}
@@ -47,13 +48,23 @@ class HostConfigurationCommittedError extends Error {}
 export function parseSetupOptions(args: string[]): {
   host: SetupHost;
   verbose: boolean;
+  registry?: string;
 } {
   let host: SetupHost | undefined;
   let verbose = false;
+  let registry: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (value === "--verbose") {
       verbose = true;
+      continue;
+    }
+    if (value === "--registry" || value.startsWith("--registry=")) {
+      if (registry !== undefined) throw new Error(setupUsage());
+      const registryValue = value.startsWith("--registry=")
+        ? value.slice("--registry=".length)
+        : args[++index];
+      registry = parseRegistry(registryValue);
       continue;
     }
     const hostValue = value.startsWith("--host=")
@@ -71,7 +82,7 @@ export function parseSetupOptions(args: string[]): {
     host = hostValue;
   }
   if (!host) throw new Error(setupUsage());
-  return { host, verbose };
+  return { host, verbose, ...(registry ? { registry } : {}) };
 }
 
 export async function runSetup(
@@ -82,6 +93,7 @@ export async function runSetup(
   const promptToken = dependencies.promptToken ?? promptAccessToken;
   const env = dependencies.env ?? process.env;
   const verbose = dependencies.verbose ?? false;
+  const registry = dependencies.registry;
   const token = (
     dependencies.token ??
     env.INTERN_ACCESS_TOKEN ??
@@ -101,7 +113,7 @@ export async function runSetup(
     const previousToken = await snapshotFile(tokenFile);
     await writeAccessToken(config, token);
     try {
-      await configureHost(host, packageSpec, env, run);
+      await configureHost(host, packageSpec, registry, env, run);
     } catch (error) {
       if (!(error instanceof HostConfigurationCommittedError)) {
         await restoreFile(tokenFile, previousToken);
@@ -124,10 +136,19 @@ export async function runSetup(
 async function configureHost(
   host: SetupHost,
   packageSpec: string,
+  registry: string | undefined,
   env: NodeJS.ProcessEnv,
   run: (command: string, args: string[]) => Promise<CommandResult>,
 ): Promise<void> {
-  const launcher = ["npx", "--yes", `--package=${packageSpec}`, "intern-mcp", "launch"];
+  const launcher = [
+    "npx",
+    "--yes",
+    "--prefer-online",
+    ...(registry ? [`--@archastro:registry=${registry}`] : []),
+    `--package=${packageSpec}`,
+    "intern-mcp",
+    "launch",
+  ];
   const environmentArgs = [
     "INTERN_BASE_URL",
     "INTERN_WORKSPACE_ROOT",
@@ -324,7 +345,25 @@ function question(lines: Interface): Promise<string> {
 }
 
 function setupUsage(): string {
-  return "Usage: intern-mcp setup --host codex|claude [--verbose]";
+  return "Usage: intern-mcp setup --host codex|claude [--verbose] [--registry URL]";
+}
+
+function parseRegistry(value: string | undefined): string {
+  try {
+    const registry = new URL(value ?? "");
+    if (
+      registry.protocol !== "https:" ||
+      registry.username ||
+      registry.password ||
+      registry.search ||
+      registry.hash
+    ) {
+      throw new Error("unsafe registry");
+    }
+    return registry.toString().replace(/\/$/, "");
+  } catch {
+    throw new Error(setupUsage());
+  }
 }
 
 export async function readStoredAccessToken(config: InternConfig): Promise<string> {

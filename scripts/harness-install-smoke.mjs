@@ -103,6 +103,8 @@ try {
     "--host",
     "codex",
     "--verbose",
+    "--registry",
+    publicRegistry,
   ]);
   if (!codexSetup.stdout.includes("Intern connected to Codex as Harness · admin")) {
     throw new Error("packaged setup did not validate and configure Codex");
@@ -120,12 +122,21 @@ try {
   if (
     !codex.stdout.includes("intern-mcp") ||
     !codex.stdout.includes("launch") ||
+    !codex.stdout.includes("--prefer-online") ||
+    !codex.stdout.includes(`--@archastro:registry=${publicRegistry}`) ||
     codex.stdout.includes("harness-proof-token")
   ) {
     throw new Error("Codex did not persist the packaged Intern MCP profile launcher");
   }
 
-  const claudeSetup = await run("npx", [...setupCommand, "setup", "--host", "claude"]);
+  const claudeSetup = await run("npx", [
+    ...setupCommand,
+    "setup",
+    "--host",
+    "claude",
+    "--registry",
+    publicRegistry,
+  ]);
   if (
     !claudeSetup.stdout.includes("Intern connected to Claude Code as Harness · admin")
   ) {
@@ -135,6 +146,8 @@ try {
   if (
     !claude.stdout.includes("intern-mcp") ||
     !claude.stdout.includes("launch") ||
+    !claude.stdout.includes("--prefer-online") ||
+    !claude.stdout.includes(`--@archastro:registry=${publicRegistry}`) ||
     claude.stdout.includes("harness-proof-token") ||
     !claude.stdout.includes("Connected")
   ) {

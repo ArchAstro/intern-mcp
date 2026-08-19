@@ -34,7 +34,10 @@ switch (command) {
   case "setup":
     try {
       const options = parseSetupOptions(process.argv.slice(3));
-      await runSetup(config, options.host, { verbose: options.verbose });
+      await runSetup(config, options.host, {
+        verbose: options.verbose,
+        registry: options.registry,
+      });
     } catch (error) {
       process.stderr.write(
         `Intern setup failed: ${error instanceof Error ? error.message : "request failed"}\n`,
@@ -44,7 +47,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: intern-mcp serve|launch|status|setup --host codex|claude [--verbose]\n",
+      "Usage: intern-mcp serve|launch|status|setup --host codex|claude [--verbose] [--registry URL]\n",
     );
     process.exitCode = 2;
 }
