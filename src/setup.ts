@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createInterface } from "node:readline/promises";
+import { createInterface, type Interface } from "node:readline";
 import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -39,16 +39,39 @@ interface SetupDependencies {
   run?: (command: string, args: string[]) => Promise<CommandResult>;
   write?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
+  verbose?: boolean;
 }
 
 class HostConfigurationCommittedError extends Error {}
 
-export function parseSetupHost(args: string[]): SetupHost {
-  const equals = args.find((value) => value.startsWith("--host="));
-  const index = args.indexOf("--host");
-  const value = equals?.slice("--host=".length) ?? (index >= 0 ? args[index + 1] : "");
-  if (value === "codex" || value === "claude") return value;
-  throw new Error("Usage: intern-mcp setup --host codex|claude");
+export function parseSetupOptions(args: string[]): {
+  host: SetupHost;
+  verbose: boolean;
+} {
+  let host: SetupHost | undefined;
+  let verbose = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "--verbose") {
+      verbose = true;
+      continue;
+    }
+    const hostValue = value.startsWith("--host=")
+      ? value.slice("--host=".length)
+      : value === "--host"
+        ? args[++index]
+        : undefined;
+    if (
+      hostValue === undefined ||
+      host !== undefined ||
+      (hostValue !== "codex" && hostValue !== "claude")
+    ) {
+      throw new Error(setupUsage());
+    }
+    host = hostValue;
+  }
+  if (!host) throw new Error(setupUsage());
+  return { host, verbose };
 }
 
 export async function runSetup(
@@ -58,6 +81,7 @@ export async function runSetup(
 ): Promise<InternSession> {
   const promptToken = dependencies.promptToken ?? promptAccessToken;
   const env = dependencies.env ?? process.env;
+  const verbose = dependencies.verbose ?? false;
   const token = (
     dependencies.token ??
     env.INTERN_ACCESS_TOKEN ??
@@ -67,7 +91,7 @@ export async function runSetup(
 
   const session = dependencies.session
     ? await dependencies.session(token)
-    : await verifyMcp(token, env);
+    : await verifyMcp(token, env, verbose);
   const run = dependencies.run ?? runCommand;
   const packageSpec =
     dependencies.packageSpec ?? env.INTERN_MCP_PACKAGE ?? defaultPackage;
@@ -177,13 +201,19 @@ async function configureHost(
 async function verifyMcp(
   token: string,
   env: NodeJS.ProcessEnv,
+  verbose: boolean,
 ): Promise<InternSession> {
   const entry = fileURLToPath(new URL("./index.js", import.meta.url));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [entry, "serve"],
-    env: { ...process.env, ...env, INTERN_ACCESS_TOKEN: token },
-    stderr: "pipe",
+    env: {
+      ...process.env,
+      ...env,
+      INTERN_ACCESS_TOKEN: token,
+      ...(verbose ? { INTERN_MCP_VERBOSE: "1" } : {}),
+    },
+    stderr: verbose ? "inherit" : "pipe",
   });
   const client = new Client({ name: "intern-setup", version: PACKAGE_VERSION });
   await client.connect(transport);
@@ -225,21 +255,76 @@ export async function promptAccessToken(
   input: NodeJS.ReadableStream = process.stdin,
   output: NodeJS.WritableStream = process.stderr,
 ): Promise<string> {
+  const prompt = "Paste Intern access token: ";
   const hiddenOutput = new Writable({
     write(_chunk, _encoding, callback) {
       callback();
     },
   });
   const terminal = Boolean((input as { isTTY?: boolean }).isTTY);
-  const lines = createInterface({ input, output: hiddenOutput, terminal });
-  output.write("Paste Intern access token: ");
+  const lines = createInterface({
+    input,
+    output: terminal ? output : hiddenOutput,
+    terminal,
+  });
+  if (terminal) installMaskedOutput(lines, output, prompt);
+  output.write(prompt);
   try {
-    const token = await lines.question("");
-    output.write("\n");
+    const token = await question(lines);
+    if (!terminal) output.write("\n");
     return token;
   } finally {
     lines.close();
   }
+}
+
+function installMaskedOutput(
+  lines: Interface,
+  output: NodeJS.WritableStream,
+  prompt: string,
+): void {
+  const masked = lines as Interface & {
+    line: string;
+    _writeToOutput(value: string): void;
+  };
+  masked._writeToOutput = (value: string) => {
+    if (value.includes("\n")) {
+      output.write(value);
+      return;
+    }
+    if (!value) return;
+    output.write(
+      `\r${String.fromCharCode(27)}[2K${prompt}${"*".repeat(Array.from(masked.line).length)}`,
+    );
+  };
+}
+
+function question(lines: Interface): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      lines.removeListener("SIGINT", cancel);
+      lines.removeListener("close", cancel);
+    };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Token entry cancelled"));
+    };
+    lines.once("SIGINT", cancel);
+    lines.once("close", cancel);
+    lines.question("", (answer) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(answer);
+    });
+  });
+}
+
+function setupUsage(): string {
+  return "Usage: intern-mcp setup --host codex|claude [--verbose]";
 }
 
 export async function readStoredAccessToken(config: InternConfig): Promise<string> {

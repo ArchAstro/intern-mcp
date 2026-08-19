@@ -62,17 +62,24 @@ try {
         .end('{"error":"unauthorized"}');
       return;
     }
-    response.writeHead(200, { "content-type": "application/json" }).end(
-      JSON.stringify({
-        user: {
-          id: "usr_harness",
-          org: "org_harness",
-          org_name: "Harness",
-          org_role: "admin",
-        },
-        org: { id: "intorg_harness", slug: "harness", state: "active" },
-      }),
-    );
+    response
+      .writeHead(200, {
+        "content-type": "application/json",
+        "set-cookie": "session=harness-response-secret",
+        "x-private-header": "harness-private-secret",
+        "x-request-id": "harness-request-id",
+      })
+      .end(
+        JSON.stringify({
+          user: {
+            id: "usr_harness",
+            org: "org_harness",
+            org_name: "Harness",
+            org_role: "admin",
+          },
+          org: { id: "intorg_harness", slug: "harness", state: "active" },
+        }),
+      );
   });
   await new Promise((resolve) => sessionServer.listen(0, "127.0.0.1", resolve));
   const address = sessionServer.address();
@@ -90,9 +97,24 @@ try {
   ];
 
   // Cross the packaged setup command and each real host configuration writer.
-  const codexSetup = await run("npx", [...setupCommand, "setup", "--host", "codex"]);
+  const codexSetup = await run("npx", [
+    ...setupCommand,
+    "setup",
+    "--host",
+    "codex",
+    "--verbose",
+  ]);
   if (!codexSetup.stdout.includes("Intern connected to Codex as Harness · admin")) {
     throw new Error("packaged setup did not validate and configure Codex");
+  }
+  if (
+    !codexSetup.stderr.includes("http.response") ||
+    !codexSetup.stderr.includes('requestId="harness-request-id"') ||
+    codexSetup.stderr.includes("harness-proof-token") ||
+    codexSetup.stderr.includes("harness-response-secret") ||
+    codexSetup.stderr.includes("harness-private-secret")
+  ) {
+    throw new Error("verbose setup diagnostics were missing or exposed a secret");
   }
   const codex = await run("codex", ["mcp", "get", "intern"]);
   if (

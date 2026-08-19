@@ -6,26 +6,35 @@ import { loadConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { WorkspaceManager } from "./workspace.js";
 import { SSHCredentialManager } from "./ssh.js";
-import { parseSetupHost, readStoredAccessToken, runSetup } from "./setup.js";
+import { parseSetupOptions, readStoredAccessToken, runSetup } from "./setup.js";
 
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
+const verbose =
+  process.argv.includes("--verbose") || process.env.INTERN_MCP_VERBOSE === "1";
+const diagnostics = verbose
+  ? (line: string) => process.stderr.write(`${line}\n`)
+  : undefined;
 
 switch (command) {
   case "serve":
-    await serveUntilClosed(new AuthClient());
+    await serveUntilClosed(new AuthClient(), diagnostics);
     break;
   case "launch":
-    await serveUntilClosed(new AuthClient(await readStoredAccessToken(config)));
+    await serveUntilClosed(
+      new AuthClient(await readStoredAccessToken(config)),
+      diagnostics,
+    );
     break;
   case "status":
     process.stdout.write(
-      `${JSON.stringify(await new InternAPI(config, new AuthClient()).session(), null, 2)}\n`,
+      `${JSON.stringify(await new InternAPI(config, new AuthClient(), fetch, diagnostics).session(), null, 2)}\n`,
     );
     break;
   case "setup":
     try {
-      await runSetup(config, parseSetupHost(process.argv.slice(3)));
+      const options = parseSetupOptions(process.argv.slice(3));
+      await runSetup(config, options.host, { verbose: options.verbose });
     } catch (error) {
       process.stderr.write(
         `Intern setup failed: ${error instanceof Error ? error.message : "request failed"}\n`,
@@ -35,13 +44,16 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: intern-mcp serve|launch|status|setup --host codex|claude\n",
+      "Usage: intern-mcp serve|launch|status|setup --host codex|claude [--verbose]\n",
     );
     process.exitCode = 2;
 }
 
-async function serveUntilClosed(auth: AuthClient): Promise<void> {
-  const api = new InternAPI(config, auth);
+async function serveUntilClosed(
+  auth: AuthClient,
+  diagnosticSink?: (line: string) => void,
+): Promise<void> {
+  const api = new InternAPI(config, auth, fetch, diagnosticSink);
   const ssh = new SSHCredentialManager(config, api);
   const workspaces = new WorkspaceManager(config, ssh);
   const handle = serveStdio(() => buildServer(auth, api, workspaces));

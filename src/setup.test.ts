@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InternSession } from "./api.js";
 import {
-  parseSetupHost,
+  parseSetupOptions,
   promptAccessToken,
   readStoredAccessToken,
   runSetup,
@@ -235,10 +235,17 @@ describe("Intern MCP setup", () => {
     ).resolves.toBe("99999999\n");
   });
 
-  it("accepts only explicit supported hosts", () => {
-    expect(parseSetupHost(["--host", "codex"])).toBe("codex");
-    expect(parseSetupHost(["--host=claude"])).toBe("claude");
-    expect(() => parseSetupHost(["--host", "cursor"])).toThrow("Usage:");
+  it("accepts supported hosts and opt-in verbose diagnostics", () => {
+    expect(parseSetupOptions(["--host", "codex"])).toEqual({
+      host: "codex",
+      verbose: false,
+    });
+    expect(parseSetupOptions(["--verbose", "--host=claude"])).toEqual({
+      host: "claude",
+      verbose: true,
+    });
+    expect(() => parseSetupOptions(["--host", "cursor"])).toThrow("Usage:");
+    expect(() => parseSetupOptions(["--host", "codex", "--debug"])).toThrow("Usage:");
   });
 
   it("reads a piped token without echoing it", async () => {
@@ -251,5 +258,31 @@ describe("Intern MCP setup", () => {
     await expect(promptAccessToken(input, output)).resolves.toBe("secret-token");
     expect(visible).toContain("Paste Intern access token");
     expect(visible).not.toContain("secret-token");
+  });
+
+  it("renders one asterisk per pasted token character on a terminal", async () => {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    input.isTTY = true;
+    output.isTTY = true;
+    let visible = "";
+    output.on("data", (chunk) => (visible += chunk.toString()));
+    input.end("secret-token\n");
+
+    await expect(promptAccessToken(input, output)).resolves.toBe("secret-token");
+    expect(visible).toContain("*".repeat("secret-token".length));
+    expect(visible).not.toContain("secret-token");
+  });
+
+  it("rejects terminal cancellation instead of leaving setup pending", async () => {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    input.isTTY = true;
+    output.isTTY = true;
+
+    const pending = promptAccessToken(input, output);
+    input.write(String.fromCharCode(3));
+
+    await expect(pending).rejects.toThrow("Token entry cancelled");
   });
 });

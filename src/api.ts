@@ -3,6 +3,8 @@ import type { AuthClient } from "./auth.js";
 import type { InternConfig } from "./config.js";
 import * as z from "zod/v4";
 
+export type DiagnosticSink = (line: string) => void;
+
 export interface InternSession {
   user: {
     id: string;
@@ -101,6 +103,7 @@ export class InternAPI {
     private readonly config: InternConfig,
     private readonly auth: AuthClient,
     private readonly fetchFn: typeof fetch = fetch,
+    private readonly diagnostics?: DiagnosticSink,
   ) {}
 
   session(): Promise<InternSession> {
@@ -136,17 +139,42 @@ export class InternAPI {
 
   private async request<T>(pathname: string, init: RequestInit = {}): Promise<T> {
     const token = await this.auth.accessToken();
-    const response = await this.fetchFn(`${this.config.internBaseURL}${pathname}`, {
-      ...init,
-      signal: AbortSignal.timeout(30_000),
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${token}`,
-        ...(this.config.iapIDToken
-          ? { "proxy-authorization": `Bearer ${this.config.iapIDToken}` }
-          : {}),
-        ...init.headers,
-      },
+    const method = init.method ?? "GET";
+    const diagnosticFields = {
+      method,
+      origin: diagnosticOrigin(this.config.internBaseURL),
+      path: pathname,
+    };
+    const startedAt = performance.now();
+    this.log("http.start", diagnosticFields);
+    let response: Response;
+    try {
+      response = await this.fetchFn(`${this.config.internBaseURL}${pathname}`, {
+        ...init,
+        signal: AbortSignal.timeout(30_000),
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+          ...(this.config.iapIDToken
+            ? { "proxy-authorization": `Bearer ${this.config.iapIDToken}` }
+            : {}),
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      this.log("http.error", {
+        ...diagnosticFields,
+        durationMs: Math.round(performance.now() - startedAt),
+        errorName: safeErrorName(error),
+        ...safeErrorCodes(error),
+      });
+      throw error;
+    }
+    this.log("http.response", {
+      ...diagnosticFields,
+      status: response.status,
+      durationMs: Math.round(performance.now() - startedAt),
+      ...diagnosticResponseHeaders(response),
     });
     const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
@@ -160,4 +188,67 @@ export class InternAPI {
     }
     return body as T;
   }
+
+  private log(event: string, fields: Record<string, string | number | boolean>): void {
+    if (!this.diagnostics) return;
+    const values = Object.entries(fields)
+      .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+      .join(" ");
+    this.diagnostics(`[intern-mcp] ${event} ${values}`);
+  }
+}
+
+function diagnosticOrigin(value: string): string {
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.hostname}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return "invalid-url";
+  }
+}
+
+function diagnosticResponseHeaders(
+  response: Response,
+): Record<string, string | boolean> {
+  const fields: Record<string, string | boolean> = {};
+  const contentType = response.headers.get("content-type");
+  if (
+    contentType &&
+    /^[A-Za-z0-9!#$&^_.+/-]+(?:;\s*[A-Za-z0-9!#$&^_.+/-]+=[A-Za-z0-9!#$&^_.+/-]+)*$/.test(
+      contentType,
+    )
+  ) {
+    fields.contentType = contentType;
+  }
+  const requestID = response.headers.get("x-request-id");
+  if (requestID && /^[A-Za-z0-9._:-]{1,128}$/.test(requestID)) {
+    fields.requestId = requestID;
+  }
+  if (response.headers.get("x-goog-iap-generated-response") === "true") {
+    fields.iapGeneratedResponse = true;
+  }
+  return fields;
+}
+
+function safeErrorName(error: unknown): string {
+  if (!(error instanceof Error)) return "UnknownError";
+  return /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name) ? error.name : "Error";
+}
+
+function safeErrorCodes(error: unknown): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const code = errorCode(error);
+  if (code) fields.errorCode = code;
+  const cause = error instanceof Error && "cause" in error ? error.cause : undefined;
+  const causeCode = errorCode(cause);
+  if (causeCode) fields.causeCode = causeCode;
+  return fields;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return undefined;
+  }
+  const value = String(error.code);
+  return /^[A-Z0-9_]{1,40}$/.test(value) ? value : undefined;
 }
