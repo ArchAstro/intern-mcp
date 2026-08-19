@@ -1,46 +1,141 @@
 name: release
 
+# Manually trigger from the Actions tab to:
+#   1. Bump the package version on a release branch
+#   2. Rebase-merge the version PR so main records the release
+#   3. Tag that main commit and dispatch publish.yml
+#
+# Publishing uses npm Trusted Publishing through publish.yml. The protected
+# npm-release environment remains the approval boundary for npm publication.
+
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
+  pull-requests: write
+  actions: write
 
 jobs:
-  publish:
-    name: Verify and publish npm package
+  release:
+    name: Bump, branch, and tag
     if: github.ref == 'refs/heads/main'
-    environment: npm-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          node-version: "24"
-          registry-url: https://registry.npmjs.org
-          scope: "@archastro"
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
 
       - run: npm ci --no-audit --no-fund
       - run: npm run check
 
-      - name: Refuse an existing version
-        shell: bash
+      - name: Configure git identity
         run: |
-          version="$(node -p "require('./package.json').version")"
-          if npm view "@archastro/intern-mcp@${version}" version >/dev/null 2>&1; then
-            echo "@archastro/intern-mcp@${version} already exists" >&2
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          version="$(npm version "$BUMP" --no-git-tag-version)"
+          version="${version#v}"
+          tag="v${version}"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "branch=release/$tag"
+            echo "title=release: @archastro/intern-mcp v$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push release branch
+        env:
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          TITLE: ${{ steps.bump.outputs.title }}
+        run: |
+          set -euo pipefail
+          git checkout -b "$BRANCH"
+          git add package.json package-lock.json
+          git commit -m "$TITLE"
+          git push origin "$BRANCH"
+
+      - name: Open and merge release PR
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          TITLE: ${{ steps.bump.outputs.title }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          set -euo pipefail
+          body=$(cat <<EOF
+          Automated release version bump opened by \`release.yml\`.
+
+          - Planned tag: \`$TAG\`
+          - After this PR merges, \`release.yml\` tags the resulting \`main\` commit
+            and dispatches \`publish.yml\` through npm Trusted Publishing.
+
+          Tests ran before this version-only commit.
+          EOF
+          )
+          pr_url=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$body")
+          gh pr merge "$pr_url" --rebase --delete-branch
+          merged_sha="$(gh pr view "$pr_url" --json mergeCommit --jq '.mergeCommit.oid')"
+          if [[ ! "$merged_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Could not resolve the merged release commit for $pr_url" >&2
             exit 1
           fi
+          echo "merged_sha=$merged_sha" >> "$GITHUB_OUTPUT"
+          echo "Merged $pr_url"
 
-      - name: Publish package
-        run: npm publish --access public
+      - name: Tag the merged main commit
         env:
-          # NPM_TOKEN bootstraps 0.1.0. Afterward npm trusted publishing for
-          # this workflow uses GitHub OIDC and the secret can be removed.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor "$MERGED_SHA" origin/main || {
+            echo "Merged release commit $MERGED_SHA is not on origin/main" >&2
+            exit 1
+          }
+          merged_version="$(git show "$MERGED_SHA:package.json" | node -e "let input=''; process.stdin.on('data', chunk => input += chunk).on('end', () => process.stdout.write(JSON.parse(input).version))")"
+          if [[ "$merged_version" != "$VERSION" ]]; then
+            echo "Merged release version mismatch: expected $VERSION, found $merged_version" >&2
+            exit 1
+          fi
+          git tag -a "$TAG" "$MERGED_SHA" -m "$TAG"
+          git push origin "$TAG"
+
+      # Tags pushed by GITHUB_TOKEN do not trigger another workflow, so the
+      # release workflow explicitly dispatches publish.yml at the tag.
+      - name: Dispatch publish workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: gh workflow run publish.yml --ref "$TAG"
