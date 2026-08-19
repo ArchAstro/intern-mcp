@@ -1,0 +1,84 @@
+name: publish
+
+# Triggered by the vX.Y.Z tags created by release.yml. npm authentication uses
+# Trusted Publishing (OIDC), so this workflow does not need an NPM_TOKEN.
+#
+# One-time npm configuration:
+#   package: @archastro/intern-mcp
+#   repository: ArchAstro/intern-mcp
+#   workflow: publish.yml
+#   environment: npm-release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # release.yml dispatches this workflow because tags pushed by GITHUB_TOKEN
+  # do not themselves trigger workflow runs.
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Verify and publish npm package
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: npm-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Node 24 ships npm with Trusted Publishing support.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+          scope: "@archastro"
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+
+      - name: Verify package version matches tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          actual="$(node -p "require('./package.json').version")"
+          if [[ "$actual" != "$version" ]]; then
+            echo "Version mismatch: tag says $version, package.json says $actual" >&2
+            exit 1
+          fi
+
+      - name: Refuse an existing version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@archastro/intern-mcp@${version}" version >/dev/null 2>&1; then
+            echo "@archastro/intern-mcp@${version} already exists" >&2
+            exit 1
+          fi
+
+      # npm Trusted Publishing supports private source repositories, but npm
+      # provenance attestations do not. Add --provenance if this repo becomes
+      # public.
+      - name: Publish package through npm OIDC
+        run: npm publish --access public
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          gh release create "$TAG" \
+            --title "@archastro/intern-mcp v$version" \
+            --notes "Published to npm: https://www.npmjs.com/package/@archastro/intern-mcp/v/$version" \
+            --generate-notes

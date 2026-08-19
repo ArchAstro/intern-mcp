@@ -52,8 +52,7 @@ version replacing `0.1.0`. The installer updates only the user-level `intern`
 registration. The host never executes a newly published package version merely
 because it restarted.
 
-The repository is private and the npm package has not been published yet. The
-commands above become available after the first package release.
+The repository is private; the package is public on npm.
 
 If a developer machine maps the `@archastro` scope to another registry, override
 that local mapping for this public package:
@@ -63,14 +62,14 @@ npx --yes --@archastro:registry=https://registry.npmjs.org \
   @archastro/intern-mcp@0.1.0 setup --host codex
 ```
 
-Maintainers run the manual **release** workflow to publish the version in
-`package.json`. The first release uses a short-lived `NPM_TOKEN` repository
-secret in the protected `npm-release` environment because npm cannot attach a
-trusted publisher to a package that does not exist. That environment accepts
-only protected branches; `main` itself requires CI and approving review. After
-`0.1.0`, configure `ArchAstro/intern-mcp`, `release.yml`, and environment
-`npm-release` as the npm trusted publisher, remove the secret, and later runs
-authenticate with GitHub OIDC.
+Maintainers run the manual **release** workflow from `main` and choose a patch,
+minor, or major bump. It verifies the package, commits the version change on a
+release branch, rebase-merges the version-only PR, tags that exact merged commit
+as `vX.Y.Z`, and dispatches `publish.yml`. The publish workflow verifies that
+the tag and `package.json` agree, publishes through npm Trusted Publishing, and
+creates the GitHub Release. npm must configure `ArchAstro/intern-mcp`,
+`publish.yml`, and environment `npm-release` as the trusted publisher; no
+`NPM_TOKEN` is used.
 
 ## Configure the server
 
