@@ -81,6 +81,7 @@ describe("Intern MCP setup", () => {
       args: expect.arrayContaining([
         "add",
         "INTERN_WORKSPACE_ROOT=/tmp/Intern",
+        "--prefer-online",
         "--package=/tmp/intern-mcp.tgz",
         "launch",
       ]),
@@ -92,6 +93,37 @@ describe("Intern MCP setup", () => {
     });
     expect(output.join("")).toContain("Intern connected to Codex as Acme · admin");
     expect(output.join("")).not.toContain("secret-token");
+  });
+
+  it("saves a launcher that refreshes the latest stable package", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    await runSetup(config, "codex", {
+      token: "secret-token",
+      env,
+      registry: "https://registry.npmjs.org",
+      session: async () => session,
+      run: async (command, args) => {
+        calls.push({ command, args });
+        return {
+          status: 0,
+          stdout: args.includes("get")
+            ? '{"command": "npx", "args": ["intern-mcp", "launch"]}'
+            : "ok",
+        };
+      },
+      write: () => {},
+    });
+
+    expect(calls[0]).toMatchObject({
+      command: "codex",
+      args: expect.arrayContaining([
+        "--prefer-online",
+        "--@archastro:registry=https://registry.npmjs.org",
+        "--package=@archastro/intern-mcp@latest",
+        "intern-mcp",
+        "launch",
+      ]),
+    });
   });
 
   it("replaces only Claude's user-scoped Intern entry", async () => {
@@ -244,8 +276,22 @@ describe("Intern MCP setup", () => {
       host: "claude",
       verbose: true,
     });
+    expect(
+      parseSetupOptions(["--host=codex", "--registry", "https://registry.npmjs.org/"]),
+    ).toEqual({
+      host: "codex",
+      verbose: false,
+      registry: "https://registry.npmjs.org",
+    });
     expect(() => parseSetupOptions(["--host", "cursor"])).toThrow("Usage:");
     expect(() => parseSetupOptions(["--host", "codex", "--debug"])).toThrow("Usage:");
+    expect(() =>
+      parseSetupOptions([
+        "--host",
+        "codex",
+        "--registry=https://user:secret@example.com",
+      ]),
+    ).toThrow("Usage:");
   });
 
   it("reads a piped token without echoing it", async () => {
