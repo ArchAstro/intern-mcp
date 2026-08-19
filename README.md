@@ -23,15 +23,21 @@ user configuration and starts the package when a session needs the server.
 npx --yes @archastro/intern-mcp@0.1.0 setup --host claude
 ```
 
+Add `--verbose` to either setup command to print redacted request lifecycle
+diagnostics on stderr. Verbose output includes the method, query-free endpoint,
+status, duration, and allowlisted response metadata. It never prints the access
+token, request headers, response body, or cookies.
+
 The installer uses Claude Code's user scope, so Intern is available in every
 project. Run `/mcp` inside Claude Code to inspect the connection.
 
 Create a profile access token at <https://tryintern.dev/connect>, copy it, then
 run the command for your host. The installer validates the token, configures the
 host through its native CLI, verifies the saved registration, and prints the
-Intern organization and role. Paste the token at the hidden terminal prompt so
-it never enters shell history. Intern displays it only once. The host stores it
-through the `intern-mcp launch` profile command. The bearer itself lives in
+Intern organization and role. The terminal renders one `*` for every pasted
+token character so the paste is visible without revealing the secret or adding
+it to shell history. Intern displays it only once. The host stores it through
+the `intern-mcp launch` profile command. The bearer itself lives in
 `~/.config/intern/access-token` with mode `0600`; it is never placed in child
 process arguments or host configuration.
 

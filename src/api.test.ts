@@ -67,3 +67,36 @@ test("sends IAP and ArchAstro credentials in separate headers when minting SSH c
   expect(request?.headers.get("proxy-authorization")).toBe("Bearer google-id-token");
   expect(request?.headers.get("authorization")).toBe("Bearer archastro-token");
 });
+
+test("verbose diagnostics identify an IAP interception without exposing request secrets", async () => {
+  const diagnostics: string[] = [];
+  const api = new InternAPI(
+    {
+      internBaseURL: "https://tryintern.dev",
+      workspaceRoot: "/tmp/workspaces",
+      configRoot: "/tmp/config",
+    },
+    { accessToken: async () => "secret-profile-token" } as never,
+    async () =>
+      new Response("Invalid IAP credentials: secret-reflection", {
+        status: 401,
+        headers: {
+          "content-type": "text/html; charset=UTF-8",
+          "set-cookie": "session=secret-cookie",
+          "x-goog-iap-generated-response": "true",
+          "x-private-header": "secret-header",
+        },
+      }),
+    (line) => diagnostics.push(line),
+  );
+
+  await expect(api.session()).rejects.toThrow("AUTH_REQUIRED");
+  const output = diagnostics.join("\n");
+  expect(output).toContain("http.response");
+  expect(output).toContain("status=401");
+  expect(output).toContain("iapGeneratedResponse=true");
+  expect(output).not.toContain("secret-profile-token");
+  expect(output).not.toContain("secret-reflection");
+  expect(output).not.toContain("secret-cookie");
+  expect(output).not.toContain("secret-header");
+});
