@@ -2,33 +2,30 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { createInterface, type Interface } from "node:readline";
-import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { InternSession } from "./api.js";
 import { PACKAGE_VERSION, type InternConfig } from "./config.js";
+import {
+  configureHost,
+  HOST_DISPLAY_NAME,
+  HostConfigurationCommittedError,
+  isSetupHost,
+  SETUP_HOSTS,
+  type CommandResult,
+  type SetupHost,
+} from "./setup-hosts.js";
+
+export type { SetupHost } from "./setup-hosts.js";
+export { SETUP_HOSTS } from "./setup-hosts.js";
 
 const exec = promisify(execFile);
 const defaultPackage = "@archastro/intern-mcp@latest";
 
-export type SetupHost = "codex" | "claude";
-
-interface CommandResult {
-  status: number;
-  stdout: string;
-}
-
 interface FileSnapshot {
   contents: Buffer;
   mode: number;
-}
-
-interface ClaudeEntrySnapshot {
-  exists: boolean;
-  value?: unknown;
 }
 
 interface SetupDependencies {
@@ -42,8 +39,6 @@ interface SetupDependencies {
   verbose?: boolean;
   registry?: string;
 }
-
-class HostConfigurationCommittedError extends Error {}
 
 export function parseSetupOptions(args: string[]): {
   host: SetupHost;
@@ -72,11 +67,7 @@ export function parseSetupOptions(args: string[]): {
       : value === "--host"
         ? args[++index]
         : undefined;
-    if (
-      hostValue === undefined ||
-      host !== undefined ||
-      (hostValue !== "codex" && hostValue !== "claude")
-    ) {
+    if (hostValue === undefined || host !== undefined || !isSetupHost(hostValue)) {
       throw new Error(setupUsage());
     }
     host = hostValue;
@@ -113,109 +104,23 @@ export async function runSetup(
     const previousToken = await snapshotFile(tokenFile);
     await writeAccessToken(config, token);
     try {
-      await configureHost(host, packageSpec, registry, env, run);
+      const extra = await configureHost(host, packageSpec, registry, env, run);
+      const write =
+        dependencies.write ?? ((message: string) => process.stdout.write(message));
+      const hostName = HOST_DISPLAY_NAME[host];
+      write(
+        `Intern connected to ${hostName} as ${session.user.org_name} · ${session.user.org_role}.\nRestart ${hostName}, then ask it to run intern_auth_status.\n`,
+      );
+      if (extra) write(extra);
     } catch (error) {
       if (!(error instanceof HostConfigurationCommittedError)) {
         await restoreFile(tokenFile, previousToken);
       }
       throw error;
     }
-
-    const write =
-      dependencies.write ?? ((message: string) => process.stdout.write(message));
-    const hostName = host === "codex" ? "Codex" : "Claude Code";
-    write(
-      `Intern connected to ${hostName} as ${session.user.org_name} · ${session.user.org_role}.\nRestart ${hostName}, then ask it to run intern_auth_status.\n`,
-    );
     return session;
   } finally {
     await releaseLock();
-  }
-}
-
-async function configureHost(
-  host: SetupHost,
-  packageSpec: string,
-  registry: string | undefined,
-  env: NodeJS.ProcessEnv,
-  run: (command: string, args: string[]) => Promise<CommandResult>,
-): Promise<void> {
-  const launcher = [
-    "npx",
-    "--yes",
-    "--prefer-online",
-    ...(registry ? [`--@archastro:registry=${registry}`] : []),
-    `--package=${packageSpec}`,
-    "intern-mcp",
-    "launch",
-  ];
-  const environmentArgs = [
-    "INTERN_BASE_URL",
-    "INTERN_WORKSPACE_ROOT",
-    "INTERN_CONFIG_ROOT",
-    "INTERN_GIT_SSH_COMMAND",
-  ].flatMap((name) => (env[name] ? ["--env", `${name}=${env[name]}`] : []));
-
-  if (host === "codex") {
-    const added = await run("codex", [
-      "mcp",
-      "add",
-      "intern",
-      ...environmentArgs,
-      "--",
-      ...launcher,
-    ]);
-    if (added.status !== 0) throw new Error("Could not configure Codex");
-    const verified = await run("codex", ["mcp", "get", "intern", "--json"]);
-    const healthy =
-      verified.status === 0 &&
-      verified.stdout.includes('"command": "npx"') &&
-      verified.stdout.includes('"launch"');
-    if (!healthy) {
-      throw new HostConfigurationCommittedError(
-        "Codex saved Intern but could not verify its registration; the new profile was retained",
-      );
-    }
-    return;
-  }
-
-  const configFile = claudeConfigFile(env);
-  const previousEntry = await readClaudeEntry(configFile);
-  let installedEntry: ClaudeEntrySnapshot | undefined;
-  try {
-    await run("claude", ["mcp", "remove", "--scope", "user", "intern"]);
-    const added = await run("claude", [
-      "mcp",
-      "add",
-      "--transport",
-      "stdio",
-      "--scope",
-      "user",
-      "intern",
-      ...environmentArgs,
-      "--",
-      ...launcher,
-    ]);
-    if (added.status !== 0) throw new Error("Could not configure Claude Code");
-    installedEntry = await readClaudeEntry(configFile);
-
-    const verified = await run("claude", ["mcp", "get", "intern"]);
-    const output = stripANSI(verified.stdout);
-    const healthy =
-      verified.status === 0 &&
-      /^\s*Scope:\s*User config(?:\s+\([^\n]*\))?\s*$/m.test(output) &&
-      /^\s*Status:\s*.*Connected\s*$/m.test(output) &&
-      !/^\s*Status:\s*.*Failed to connect\s*$/m.test(output) &&
-      /^\s*Command:\s*npx\s*$/m.test(output) &&
-      /^\s*Args:\s*.*\bintern-mcp\b.*\blaunch\b.*$/m.test(output);
-    if (!healthy) {
-      throw new Error(
-        "Claude Code did not select the user-level Intern launcher; remove any local/project intern entry and run setup again",
-      );
-    }
-  } catch (error) {
-    await restoreClaudeEntry(configFile, previousEntry, installedEntry);
-    throw error;
   }
 }
 
@@ -277,75 +182,93 @@ export async function promptAccessToken(
   output: NodeJS.WritableStream = process.stderr,
 ): Promise<string> {
   const prompt = "Paste Intern access token: ";
-  const hiddenOutput = new Writable({
-    write(_chunk, _encoding, callback) {
-      callback();
-    },
-  });
-  const terminal = Boolean((input as { isTTY?: boolean }).isTTY);
-  const lines = createInterface({
-    input,
-    output: terminal ? output : hiddenOutput,
-    terminal,
-  });
-  if (terminal) installMaskedOutput(lines, output, prompt);
   output.write(prompt);
-  try {
-    const token = await question(lines);
-    if (!terminal) output.write("\n");
-    return token;
-  } finally {
-    lines.close();
-  }
-}
+  const terminal = Boolean((input as { isTTY?: boolean }).isTTY);
+  const raw =
+    terminal &&
+    "setRawMode" in input &&
+    typeof (input as NodeJS.ReadStream).setRawMode === "function";
+  if (raw) (input as NodeJS.ReadStream).setRawMode(true);
+  input.resume();
 
-function installMaskedOutput(
-  lines: Interface,
-  output: NodeJS.WritableStream,
-  prompt: string,
-): void {
-  const masked = lines as Interface & {
-    line: string;
-    _writeToOutput(value: string): void;
-  };
-  masked._writeToOutput = (value: string) => {
-    if (value.includes("\n")) {
-      output.write(value);
-      return;
-    }
-    if (!value) return;
-    output.write(
-      `\r${String.fromCharCode(27)}[2K${prompt}${"*".repeat(Array.from(masked.line).length)}`,
-    );
-  };
-}
-
-function question(lines: Interface): Promise<string> {
   return new Promise((resolve, reject) => {
+    let buffer = "";
     let settled = false;
-    const cleanup = () => {
-      lines.removeListener("SIGINT", cancel);
-      lines.removeListener("close", cancel);
+
+    const paint = () => {
+      if (!terminal) return;
+      output.write(
+        `\r${String.fromCharCode(27)}[2K${prompt}${"*".repeat(Array.from(buffer).length)}`,
+      );
     };
-    const cancel = () => {
+
+    const finish = (action: () => void) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      reject(new Error("Token entry cancelled"));
+      input.removeListener("data", onData);
+      input.removeListener("end", onEnd);
+      input.removeListener("error", onError);
+      if (raw) (input as NodeJS.ReadStream).setRawMode(false);
+      action();
     };
-    lines.once("SIGINT", cancel);
-    lines.once("close", cancel);
-    lines.question("", (answer) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(answer);
-    });
+
+    const onEnd = () => {
+      finish(() => {
+        if (!terminal) output.write("\n");
+        resolve(buffer.replace(/\r?\n$/, ""));
+      });
+    };
+
+    const onError = (error: Error) => {
+      finish(() => reject(error));
+    };
+
+    const onData = (chunk: Buffer | string) => {
+      const text = stripPasteBrackets(chunk.toString("utf8"));
+      for (const char of text) {
+        if (char === "\u0003") {
+          finish(() => reject(new Error("Token entry cancelled")));
+          return;
+        }
+        if (char === "\n" || char === "\r") {
+          paint();
+          finish(() => {
+            output.write("\n");
+            resolve(buffer);
+          });
+          return;
+        }
+        if (char === "\u007f" || char === "\b") {
+          buffer = Array.from(buffer).slice(0, -1).join("");
+          paint();
+          continue;
+        }
+        if (char === "\u0015") {
+          buffer = "";
+          paint();
+          continue;
+        }
+        if (char >= " " || char === "\t") {
+          buffer += char;
+          paint();
+        }
+      }
+      paint();
+    };
+
+    input.on("data", onData);
+    input.once("end", onEnd);
+    input.once("error", onError);
   });
+}
+
+function stripPasteBrackets(value: string): string {
+  const escape = String.fromCharCode(27);
+  return value.split(`${escape}[200~`).join("").split(`${escape}[201~`).join("");
 }
 
 function setupUsage(): string {
-  return "Usage: intern-mcp setup --host codex|claude [--verbose] [--registry URL]";
+  return `Usage: intern-mcp setup --host ${SETUP_HOSTS.join("|")} [--verbose] [--registry URL]`;
 }
 
 function parseRegistry(value: string | undefined): string {
@@ -386,83 +309,6 @@ async function writeAccessToken(config: InternConfig, token: string): Promise<vo
 
 function accessTokenFile(config: InternConfig): string {
   return path.join(config.configRoot, "access-token");
-}
-
-function claudeConfigFile(env: NodeJS.ProcessEnv): string {
-  const home = env.HOME ?? os.homedir();
-  return path.join(env.CLAUDE_CONFIG_DIR ?? home, ".claude.json");
-}
-
-async function readClaudeEntry(file: string): Promise<ClaudeEntrySnapshot> {
-  try {
-    const document = JSON.parse(await fs.readFile(file, "utf8")) as {
-      mcpServers?: Record<string, unknown>;
-    };
-    if (!Object.hasOwn(document.mcpServers ?? {}, "intern")) return { exists: false };
-    return { exists: true, value: structuredClone(document.mcpServers!.intern) };
-  } catch (error) {
-    if (isMissing(error)) return { exists: false };
-    throw error;
-  }
-}
-
-async function restoreClaudeEntry(
-  file: string,
-  previous: ClaudeEntrySnapshot,
-  installed: ClaudeEntrySnapshot | undefined,
-): Promise<void> {
-  let document: { mcpServers?: Record<string, unknown>; [key: string]: unknown };
-  let mode = 0o600;
-  try {
-    const [contents, stat] = await Promise.all([
-      fs.readFile(file, "utf8"),
-      fs.stat(file),
-    ]);
-    document = JSON.parse(contents) as typeof document;
-    mode = stat.mode & 0o777;
-  } catch (error) {
-    if (!isMissing(error)) throw error;
-    document = {};
-  }
-  const servers = (document.mcpServers ??= {});
-  const currentExists = Object.hasOwn(servers, "intern");
-  const current = currentExists ? servers.intern : undefined;
-  if (
-    !installed &&
-    currentExists === previous.exists &&
-    (!currentExists || JSON.stringify(current) === JSON.stringify(previous.value))
-  ) {
-    return;
-  }
-  if (
-    installed &&
-    (currentExists !== installed.exists ||
-      (currentExists && JSON.stringify(current) !== JSON.stringify(installed.value)))
-  ) {
-    throw new Error(
-      "Claude Code's Intern configuration changed during setup; refusing to overwrite it",
-    );
-  }
-  if (!installed && currentExists) {
-    throw new Error(
-      "Claude Code's Intern configuration changed during setup; refusing to overwrite it",
-    );
-  }
-  if (previous.exists) servers.intern = previous.value;
-  else delete servers.intern;
-  await writeJSONAtomically(file, document, mode);
-}
-
-async function writeJSONAtomically(
-  file: string,
-  value: object,
-  mode: number,
-): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.intern-setup-${process.pid}-${Date.now()}`;
-  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode });
-  await fs.rename(temporary, file);
-  await fs.chmod(file, mode);
 }
 
 async function acquireSetupLock(configRoot: string): Promise<() => Promise<void>> {
@@ -541,9 +387,4 @@ function hasCode(error: unknown, code: string): boolean {
     "code" in error &&
     error.code === code
   );
-}
-
-function stripANSI(value: string): string {
-  const colorSequence = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-  return value.replace(colorSequence, "");
 }

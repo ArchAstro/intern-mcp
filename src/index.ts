@@ -47,7 +47,7 @@ switch (command) {
     break;
   default:
     process.stderr.write(
-      "Usage: intern-mcp serve|launch|status|setup --host codex|claude [--verbose] [--registry URL]\n",
+      "Usage: intern-mcp serve|launch|status|setup --host codex|claude|grok|cursor|opencode|rovodev|pi [--verbose] [--registry URL]\n",
     );
     process.exitCode = 2;
 }

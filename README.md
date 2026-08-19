@@ -31,17 +31,54 @@ token, request headers, response body, or cookies.
 The installer uses Claude Code's user scope, so Intern is available in every
 project. Run `/mcp` inside Claude Code to inspect the connection.
 
+### Grok
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host grok
+```
+
+### Cursor CLI
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host cursor
+```
+
+Setup writes `~/.cursor/mcp.json`. Cursor CLI (`agent`) and the Cursor editor
+share that file.
+
+### OpenCode
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host opencode
+```
+
+### Rovo Dev
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host rovodev
+```
+
+### Pi
+
+Pi's core CLI does not speak MCP. Setup writes the shared MCP file at
+`~/.config/mcp/mcp.json`. After setup, install the adapter and restart Pi:
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host pi
+pi install npm:pi-mcp-adapter
+```
+
 Create a profile access token at <https://tryintern.dev/connect>, copy it, then
 run the command for your host. The installer validates the token, configures the
-host through its native CLI, verifies the saved registration, and prints the
-Intern organization and role. The terminal renders one `*` for every pasted
-token character so the paste is visible without revealing the secret or adding
-it to shell history. Intern displays it only once. The host stores it through
-the `intern-mcp launch` profile command. The bearer itself lives in
-`~/.config/intern/access-token` with mode `0600`; it is never placed in child
-process arguments or host configuration.
+host, verifies the saved registration, and prints the Intern organization and
+role. The terminal renders one `*` for every pasted token character so the paste
+is visible without revealing the secret or adding it to shell history. Intern
+displays it only once. The host stores it through the `intern-mcp launch`
+profile command. The bearer itself lives in `~/.config/intern/access-token`
+with mode `0600`; it is never placed in child process arguments or host
+configuration.
 
-The two harnesses launch the same local stdio executable. Intern MCP does not
+These harnesses launch the same local stdio executable. Intern MCP does not
 run an OAuth flow or accept a token through a tool call. To rotate access, run
 setup with a new token, restart the host, and revoke the old token on the
 Connect page. Revocation blocks new API calls and SSH certificates immediately;
@@ -66,8 +103,8 @@ npx --yes --@archastro:registry=https://registry.npmjs.org \
 ```
 
 The first registry option lets npx find the setup executable. The setup
-`--registry` option saves the same scoped override in the Codex or Claude
-launcher so later host restarts continue resolving the public package.
+`--registry` option saves the same scoped override in the host launcher so
+later restarts continue resolving the public package.
 
 Maintainers run the manual **release** workflow from `main` and choose a patch,
 minor, or major bump. It verifies the package, commits the version change on a

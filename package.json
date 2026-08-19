@@ -18,7 +18,10 @@
     "model-context-protocol",
     "tryintern",
     "codex",
-    "claude"
+    "claude",
+    "grok",
+    "cursor",
+    "opencode"
   ],
   "repository": {
     "type": "git",

@@ -283,7 +283,15 @@ describe("Intern MCP setup", () => {
       verbose: false,
       registry: "https://registry.npmjs.org",
     });
-    expect(() => parseSetupOptions(["--host", "cursor"])).toThrow("Usage:");
+    expect(parseSetupOptions(["--host", "cursor"])).toEqual({
+      host: "cursor",
+      verbose: false,
+    });
+    expect(parseSetupOptions(["--host", "grok"])).toEqual({
+      host: "grok",
+      verbose: false,
+    });
+    expect(() => parseSetupOptions(["--host", "windsurf"])).toThrow("Usage:");
     expect(() => parseSetupOptions(["--host", "codex", "--debug"])).toThrow("Usage:");
     expect(() =>
       parseSetupOptions([
@@ -318,6 +326,131 @@ describe("Intern MCP setup", () => {
     await expect(promptAccessToken(input, output)).resolves.toBe("secret-token");
     expect(visible).toContain("*".repeat("secret-token".length));
     expect(visible).not.toContain("secret-token");
+  });
+
+  it("writes Cursor, OpenCode, Rovo Dev, and Pi config without embedding the token", async () => {
+    const run = vi.fn();
+    for (const host of ["cursor", "opencode", "rovodev", "pi"] as const) {
+      await runSetup(config, host, {
+        token: "secret-token",
+        packageSpec: "/tmp/intern-mcp.tgz",
+        env,
+        session: async () => session,
+        run,
+        write: () => {},
+      });
+    }
+    expect(run).not.toHaveBeenCalled();
+
+    const cursor = JSON.parse(
+      await fs.readFile(path.join(root, ".cursor", "mcp.json"), "utf8"),
+    );
+    expect(cursor.mcpServers.intern).toMatchObject({
+      type: "stdio",
+      command: "npx",
+    });
+    expect(cursor.mcpServers.intern.args).toEqual(
+      expect.arrayContaining(["intern-mcp", "launch", "--package=/tmp/intern-mcp.tgz"]),
+    );
+    expect(JSON.stringify(cursor)).not.toContain("secret-token");
+
+    const opencode = JSON.parse(
+      await fs.readFile(
+        path.join(root, ".config", "opencode", "opencode.json"),
+        "utf8",
+      ),
+    );
+    expect(opencode.mcp.intern.command).toEqual(
+      expect.arrayContaining(["npx", "intern-mcp", "launch"]),
+    );
+    expect(opencode.mcp.intern.enabled).toBe(true);
+
+    const rovodev = JSON.parse(
+      await fs.readFile(path.join(root, ".rovodev", "mcp.json"), "utf8"),
+    );
+    expect(rovodev.mcpServers.intern.transport).toBe("stdio");
+    expect(rovodev.mcpServers.intern.args).toContain("launch");
+
+    const pi = JSON.parse(
+      await fs.readFile(path.join(root, ".config", "mcp", "mcp.json"), "utf8"),
+    );
+    expect(pi.mcpServers.intern.command).toBe("npx");
+    expect(pi.mcpServers.intern.args).toContain("intern-mcp");
+  });
+
+  it("tells Pi users to install the MCP adapter", async () => {
+    const output: string[] = [];
+    await runSetup(config, "pi", {
+      token: "secret-token",
+      env,
+      session: async () => session,
+      write: (message) => output.push(message),
+    });
+    expect(output.join("")).toContain("pi install npm:pi-mcp-adapter");
+    expect(output.join("")).toContain("Intern connected to Pi");
+  });
+
+  it("registers Grok through grok mcp add without putting the token in argv", async () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    await runSetup(config, "grok", {
+      token: "secret-token",
+      packageSpec: "/tmp/intern-mcp.tgz",
+      env,
+      session: async () => session,
+      run: async (command, args) => {
+        calls.push({ command, args });
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            intern: { command: "npx", args: ["intern-mcp", "launch"] },
+          }),
+        };
+      },
+      write: () => {},
+    });
+    expect(calls[0]).toMatchObject({
+      command: "grok",
+      args: expect.arrayContaining(["mcp", "add", "intern", "-s", "user", "launch"]),
+    });
+    expect(calls[0].args.join(" ")).not.toContain("secret-token");
+    expect(calls[1]).toEqual({
+      command: "grok",
+      args: ["mcp", "list", "--json"],
+    });
+  });
+
+  it("masks a bracketed terminal paste as one asterisk per character", async () => {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    input.isTTY = true;
+    output.isTTY = true;
+    let visible = "";
+    output.on("data", (chunk) => (visible += chunk.toString()));
+    const token = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9";
+    const escape = String.fromCharCode(27);
+    const pending = promptAccessToken(input, output);
+    input.write(`${escape}[200~${token}${escape}[201~\n`);
+    await expect(pending).resolves.toBe(token);
+    expect(visible).toContain("*".repeat(token.length));
+    expect(visible).not.toContain("eyJ");
+    expect(visible).not.toContain("[200~");
+  });
+
+  it("paints one asterisk per character when a token is pasted in one chunk", async () => {
+    const input = new PassThrough() as PassThrough & { isTTY: boolean };
+    const output = new PassThrough() as PassThrough & { isTTY: boolean };
+    input.isTTY = true;
+    output.isTTY = true;
+    let visible = "";
+    output.on("data", (chunk) => (visible += chunk.toString()));
+    const pending = promptAccessToken(input, output);
+    input.write("eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9");
+    input.write("\n");
+    await expect(pending).resolves.toBe("eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9");
+    expect(visible).toContain(
+      "*".repeat("eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9".length),
+    );
+    expect(visible).not.toContain("eyJ");
   });
 
   it("rejects terminal cancellation instead of leaving setup pending", async () => {
