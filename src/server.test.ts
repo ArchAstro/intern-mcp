@@ -264,7 +264,6 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
       INTERN_ACCESS_TOKEN: "authorized-proof-token",
       INTERN_WORKSPACE_ROOT: path.join(root, "workspaces"),
       INTERN_CONFIG_ROOT: path.join(root, "config"),
-      INTERN_SDK_PACKAGE: `file:${path.resolve("node_modules/@archastro/intern-sdk")}`,
     },
   });
   const client = new Client({ name: "intern-proof", version: "1.0.0" });
@@ -289,7 +288,9 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   const preparedPackage = JSON.parse(
     await fs.readFile(path.join(structured.workspace.path, "package.json"), "utf8"),
   ) as { devDependencies?: Record<string, string> };
-  expect(preparedPackage.devDependencies?.["@archastro/intern-sdk"]).toMatch(/^file:/);
+  expect(preparedPackage.devDependencies?.["@archastro/intern-sdk"]).toMatch(
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
+  );
   const preparedLock = JSON.parse(
     await fs.readFile(
       path.join(structured.workspace.path, "package-lock.json"),
