@@ -264,6 +264,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
       INTERN_ACCESS_TOKEN: "authorized-proof-token",
       INTERN_WORKSPACE_ROOT: path.join(root, "workspaces"),
       INTERN_CONFIG_ROOT: path.join(root, "config"),
+      INTERN_SDK_PACKAGE: `file:${path.resolve("node_modules/@archastro/intern-sdk")}`,
     },
   });
   const client = new Client({ name: "intern-proof", version: "1.0.0" });
@@ -284,6 +285,21 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     validation: { valid: boolean };
   };
   expect(structured.workspace.path).toBe(path.join(root, "workspaces", "acme", "docs"));
+  expect(structured.workspace).toMatchObject({ dirty: true });
+  const preparedPackage = JSON.parse(
+    await fs.readFile(path.join(structured.workspace.path, "package.json"), "utf8"),
+  ) as { devDependencies?: Record<string, string> };
+  expect(preparedPackage.devDependencies?.["@archastro/intern-sdk"]).toMatch(/^file:/);
+  const preparedLock = JSON.parse(
+    await fs.readFile(
+      path.join(structured.workspace.path, "package-lock.json"),
+      "utf8",
+    ),
+  ) as { name?: string };
+  expect(preparedLock.name).toBe("docs");
+  await expect(
+    fs.stat(path.join(structured.workspace.path, "node_modules")),
+  ).rejects.toThrow();
   expect(structured.validation.valid, JSON.stringify(prepared.structuredContent)).toBe(
     true,
   );
@@ -336,7 +352,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
       validation: { valid: boolean };
     };
   };
-  expect(localTestResult.test).toMatchObject({
+  expect(localTestResult.test, JSON.stringify(localTestResult.test)).toMatchObject({
     running: true,
     source: "working-tree",
     validation: { valid: true },
@@ -457,9 +473,13 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await fs.rm(path.join(structured.workspace.path, "ignored.txt"));
 
   // The coding host first makes a committed change that the backend cannot run.
+  const invalidPackage = {
+    ...preparedPackage,
+    dependencies: { express: "latest" },
+  };
   await fs.writeFile(
     path.join(structured.workspace.path, "package.json"),
-    '{"private":true,"type":"module","dependencies":{"express":"latest"}}\n',
+    `${JSON.stringify(invalidPackage)}\n`,
   );
   await fs.writeFile(
     path.join(structured.workspace.path, "src/main.js"),
@@ -471,7 +491,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await exec("git", ["config", "user.name", "Proof"], {
     cwd: structured.workspace.path,
   });
-  await exec("git", ["add", "package.json", "src/main.js"], {
+  await exec("git", ["add", "package.json", "package-lock.json", "src/main.js"], {
     cwd: structured.workspace.path,
   });
   await exec("git", ["commit", "-m", "unsupported runtime dependency"], {
@@ -505,9 +525,11 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   expect(rejectedRemotePackage.stdout).toBe('{"private":true,"type":"module"}\n');
 
   // The model repairs the repository, validates it, and commits the supported page edit.
+  const { dependencies: _removedDependencies, ...supportedPackage } = invalidPackage;
+  void _removedDependencies;
   await fs.writeFile(
     path.join(structured.workspace.path, "package.json"),
-    '{"private":true,"type":"module"}\n',
+    `${JSON.stringify(supportedPackage)}\n`,
   );
   await fs.writeFile(
     path.join(structured.workspace.path, "src/main.js"),

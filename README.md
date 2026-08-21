@@ -130,6 +130,7 @@ These optional environment values override the defaults for local testing or cus
 - `INTERN_CONFIG_ROOT` — directory for the access-token profile and SSH material.
 - `INTERN_GIT_SSH_COMMAND` — optional per-process SSH command for development or custom SSH setup.
 - `INTERN_IAP_ID_TOKEN` (or `IAP_ID_TOKEN`) — Google ID token for the IAP-protected production frontend. It is sent through `Proxy-Authorization` while the ArchAstro bearer remains in `Authorization`.
+- `INTERN_SDK_PACKAGE` — development/test override for the SDK package spec. Normal site preparation always resolves `@archastro/intern-sdk@latest` from public npm.
 
 When the base URL, workspace root, config root, or Git SSH command is present
 while `setup` runs, the installer saves that nonsecret override in the selected
@@ -160,7 +161,10 @@ INTERN_MCP_PACKAGE=/absolute/path/to/intern-mcp \
 Restart Codex after adding the server. Call `intern_auth_status`, then use
 `intern_prepare_site` and edit the returned absolute path with the coding
 host's normal filesystem tools. The prepare result includes validation against
-the authenticated Intern runtime contract.
+the authenticated Intern runtime contract. Preparation contacts public npm with
+`--prefer-online`, resolves `@archastro/intern-sdk@latest`, and writes the exact
+resolved version to `devDependencies` plus `package-lock.json`. It uses
+`--package-lock-only`, so `node_modules` never enters the guarded checkout.
 
 ## Run against a local Firstlanding stack
 
