@@ -77,6 +77,53 @@ export interface SSHCredential {
   expiresAt: number;
 }
 
+export interface SitePluginInstallation {
+  binding: string;
+  plugin: string;
+  protocolVersion: number;
+  config: unknown;
+  state: string;
+  errorCode: string | null;
+}
+
+type APIRequest = <T>(pathname: string, init?: RequestInit) => Promise<T>;
+
+/**
+ * Generic client for the installation resource identified by a site and binding.
+ * Resource existence means the plugin is installed; PUT is therefore idempotent.
+ */
+export class SitePluginsClient {
+  constructor(private readonly request: APIRequest) {}
+
+  async get(siteSlug: string, plugin: string): Promise<SitePluginInstallation> {
+    const response = await this.request<{ installation: SitePluginInstallation }>(
+      sitePluginPath(siteSlug, plugin),
+    );
+    return response.installation;
+  }
+
+  async put(
+    siteSlug: string,
+    binding: string,
+    plugin: string,
+    config: unknown = {},
+  ): Promise<SitePluginInstallation> {
+    const response = await this.request<{ installation: SitePluginInstallation }>(
+      sitePluginPath(siteSlug, binding),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ plugin, config }),
+      },
+    );
+    return response.installation;
+  }
+
+  async delete(siteSlug: string, plugin: string): Promise<void> {
+    await this.request(sitePluginPath(siteSlug, plugin), { method: "DELETE" });
+  }
+}
+
 const siteRuntimeContractSchema: z.ZodType<SiteRuntimeContract> = z
   .object({
     version: z.literal("intern-node-static-v1"),
@@ -152,12 +199,18 @@ export function parseSiteRuntimeContract(value: unknown): SiteRuntimeContract {
 }
 
 export class InternAPI {
+  readonly sitePlugins: SitePluginsClient;
+
   constructor(
     private readonly config: InternConfig,
     private readonly auth: AuthClient,
     private readonly fetchFn: typeof fetch = fetch,
     private readonly diagnostics?: DiagnosticSink,
-  ) {}
+  ) {
+    this.sitePlugins = new SitePluginsClient((pathname, init) =>
+      this.request(pathname, init),
+    );
+  }
 
   session(signal?: AbortSignal): Promise<InternSession> {
     return this.request("/api/v1/mcp/session", {}, signal);
@@ -273,6 +326,10 @@ function combinedSignal(
     (signal): signal is AbortSignal => signal !== undefined && signal !== null,
   );
   return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+}
+
+function sitePluginPath(siteSlug: string, plugin: string): string {
+  return `/api/v1/mcp/sites/${encodeURIComponent(siteSlug)}/plugins/${encodeURIComponent(plugin)}`;
 }
 
 function diagnosticOrigin(value: string): string {

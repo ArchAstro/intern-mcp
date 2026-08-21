@@ -147,6 +147,88 @@ test("sends IAP and ArchAstro credentials in separate headers when minting SSH c
   expect(request?.headers.get("authorization")).toBe("Bearer archastro-token");
 });
 
+test("site plugins use generic GET, idempotent PUT, and DELETE installation resources", async () => {
+  const requests: Request[] = [];
+  const fetchFn: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    if (request.method === "DELETE") return new Response(null, { status: 204 });
+    return Response.json({
+      installation: {
+        binding: "PROFILE",
+        plugin: "me",
+        protocolVersion: 1,
+        config: {},
+        state: "active",
+        errorCode: null,
+      },
+    });
+  };
+  const api = new InternAPI(
+    {
+      internBaseURL: "https://tryintern.dev",
+      workspaceRoot: "/tmp/workspaces",
+      configRoot: "/tmp/config",
+    },
+    { accessToken: async () => "archastro-token" } as never,
+    fetchFn,
+  );
+
+  await expect(api.sitePlugins.get("docs site", "profile/me")).resolves.toEqual({
+    binding: "PROFILE",
+    plugin: "me",
+    protocolVersion: 1,
+    config: {},
+    state: "active",
+    errorCode: null,
+  });
+  await expect(api.sitePlugins.put("docs site", "profile/me", "me")).resolves.toEqual({
+    binding: "PROFILE",
+    plugin: "me",
+    protocolVersion: 1,
+    config: {},
+    state: "active",
+    errorCode: null,
+  });
+  await expect(api.sitePlugins.put("docs site", "profile/me", "me")).resolves.toEqual({
+    binding: "PROFILE",
+    plugin: "me",
+    protocolVersion: 1,
+    config: {},
+    state: "active",
+    errorCode: null,
+  });
+  await expect(
+    api.sitePlugins.delete("docs site", "profile/me"),
+  ).resolves.toBeUndefined();
+
+  expect(
+    requests.map((request) => ({ method: request.method, pathname: request.url })),
+  ).toEqual([
+    {
+      method: "GET",
+      pathname:
+        "https://tryintern.dev/api/v1/mcp/sites/docs%20site/plugins/profile%2Fme",
+    },
+    {
+      method: "PUT",
+      pathname:
+        "https://tryintern.dev/api/v1/mcp/sites/docs%20site/plugins/profile%2Fme",
+    },
+    {
+      method: "PUT",
+      pathname:
+        "https://tryintern.dev/api/v1/mcp/sites/docs%20site/plugins/profile%2Fme",
+    },
+    {
+      method: "DELETE",
+      pathname:
+        "https://tryintern.dev/api/v1/mcp/sites/docs%20site/plugins/profile%2Fme",
+    },
+  ]);
+  await expect(requests[1]?.json()).resolves.toEqual({ plugin: "me", config: {} });
+});
+
 test("verbose diagnostics identify an IAP interception without exposing request secrets", async () => {
   const diagnostics: string[] = [];
   const api = new InternAPI(

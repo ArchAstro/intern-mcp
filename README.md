@@ -197,6 +197,13 @@ not add a local adapter, production adapter, or `globalThis.intern` assignment
 to the repository. Vite bundles the SDK into `dist/`; local and production
 hosts inject their implementations outside those committed bytes.
 
+`intern_prepare_site` also ensures the site's `me` plugin is installed. The
+MCP models plugins as generic installation resources at
+`/api/v1/mcp/sites/:site/plugins/:plugin`: `GET` reads an installation, `PUT`
+idempotently installs it, and `DELETE` removes it. This is the client-side API
+assumption while the Firstlanding MCP route is finalized; plugin-specific
+boolean switches are intentionally not supported.
+
 Once the local result is correct, commit the change — including `dist/` when the preview wrote it — and call `intern_validate_site`. It checks the exact committed tree: required and protected runtime files, dependencies the backend does not install, committed build output when a build script exists, JavaScript syntax, production-style startup, and an HTTP probe. `intern_publish_site` reruns the same commit validation and refuses invalid or dirty worktrees. The MCP never stages or commits files. The tenant serves the committed tree and does not install packages or build.
 
 For each SSH clone or push, Intern MCP creates or reuses one local Ed25519 key and sends only its public half to Intern. Intern returns a five-minute user certificate plus the pinned `git.tryintern.dev` host key. MCP supplies those files only to that Git process; it never edits global Git config, `~/.ssh/config`, or the user's `known_hosts`. The MCP replaces the current certificate as needed and retains the private key for future short-lived certificates.

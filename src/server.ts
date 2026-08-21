@@ -25,7 +25,7 @@ const SERVER_INSTRUCTIONS = [
   "Work on Intern-hosted sites in guarded local Git checkouts. Intern never stages or commits files.",
   "Authentication comes from the mode-0600 profile used by intern-mcp launch, or from INTERN_ACCESS_TOKEN in a manual stdio configuration. If it is missing, ask the user to create a profile token at https://tryintern.dev/connect and run the setup command shown there. Never ask the user to paste a token into chat or a tool call.",
   "1. intern_auth_status — confirm the configured token resolves to the expected user and organization.",
-  "2. intern_prepare_site — clone or reuse the checkout; edit files at the returned absolute path with the host's filesystem tools.",
+  "2. intern_prepare_site — idempotently install the site's me plugin, clone or reuse the checkout, and edit files at the returned absolute path with the host's filesystem tools.",
   "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. It skips deleted tracked files, upgrades Intern-owned runtime files, installs devDependencies locally, runs the site build script when present, and writes dist/ into the checkout. Call it again after further edits. intern_stop_test stops it.",
   "For current-user features, add @archastro/intern-sdk as a devDependency, default-import Client, construct new Client(), and use client.me. Never write globalThis.intern, a memory adapter, a gateway adapter, or other runtime selection into the checkout. intern_test_site injects the local runtime outside the snapshot; the production host supplies its implementation to the same committed bundle.",
   "4. Commit with the host's git, including dist/ when intern_test_site wrote it, then intern_validate_site against Intern's runtime contract.",
@@ -177,7 +177,7 @@ export function buildServer(
     {
       title: "Prepare Intern checkout",
       description:
-        "Clone or validate an Intern site's guarded local checkout, resolve and pin the latest public @archastro/intern-sdk development dependency, and return its absolute path. Remote creation occurs only when createIfMissing is true.",
+        "Idempotently install the Intern site's me plugin, clone or validate its guarded local checkout, resolve and pin the latest public @archastro/intern-sdk development dependency, and return its absolute path. Remote creation occurs only when createIfMissing is true.",
       inputSchema: z.object({
         site: siteSlug,
         createIfMissing: z
@@ -550,6 +550,7 @@ export async function prepareInternSite(
     throw new Error(
       `Intern site not found: ${input.site}; set createIfMissing only if it should be created`,
     );
+  await api.sitePlugins.put(site.slug, "me", "me");
   const contract = await api.runtimeContract();
   const workspace = await workspaces.prepare(session.org.slug, site, contract);
   const validation = await workspaces.validate(session.org.slug, site, contract);
