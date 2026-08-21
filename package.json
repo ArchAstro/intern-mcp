@@ -13,9 +13,6 @@
     "dist",
     "README.md"
   ],
-  "bundleDependencies": [
-    "@archastro/intern-sdk"
-  ],
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -53,7 +50,7 @@
     "start": "node dist/index.js serve"
   },
   "dependencies": {
-    "@archastro/intern-sdk": "git+https://github.com/ArchAstro/intern-sdk.git#e95100223331128fce2054bbab65ed3fb5d74884",
+    "@archastro/intern-sdk": "0.1.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "zod": "4.4.3"
