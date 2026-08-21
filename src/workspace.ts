@@ -9,19 +9,24 @@ import type { InternConfig } from "./config.js";
 import {
   isAcceptedProtectedFile,
   renderProtectedFile,
+  type InternSession,
   type InternSite,
   type SiteRuntimeContract,
 } from "./api.js";
 import {
   missingCommittedBuildOutput,
   runLocalSiteBuild,
-  startSiteRuntime,
   validateSite,
   type RunningSiteRuntime,
   type SiteValidation,
   type ValidationIssue,
 } from "./validation.js";
 import type { SSHCredentialManager } from "./ssh.js";
+import {
+  defaultLocalUser,
+  localUserFromSession,
+  startLocalPreviewRuntime,
+} from "./preview.js";
 
 const exec = promisify(execFile);
 const slugPattern = /^[a-z][a-z0-9-]{0,62}$/;
@@ -222,6 +227,7 @@ export class WorkspaceManager {
     orgSlug: string,
     site: InternSite,
     contract: SiteRuntimeContract,
+    session?: InternSession,
   ): Promise<{ workspace: WorkspaceStatus; test: LocalSiteTest }> {
     const key = this.testKey(orgSlug, site.slug);
     return this.withTestLock(key, async () => {
@@ -273,7 +279,11 @@ export class WorkspaceManager {
             };
           }
           try {
-            const runtime = await startSiteRuntime(snapshot, contract);
+            const runtime = await startLocalPreviewRuntime(
+              snapshot,
+              contract,
+              session ? localUserFromSession(session) : defaultLocalUser(),
+            );
             if (this.closing) {
               await runtime.stop();
               await fs.rm(temporary, { recursive: true, force: true });
@@ -376,9 +386,21 @@ export class WorkspaceManager {
   private async stopTestUnlocked(key: string): Promise<boolean> {
     const session = this.localTests.get(key);
     if (!session) return false;
+    const errors: unknown[] = [];
+    try {
+      await session.runtime.stop();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await fs.rm(session.temporary, { recursive: true, force: true });
+    } catch (error) {
+      errors.push(error);
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(errors, `failed to clean local preview ${key}`);
+    }
     this.localTests.delete(key);
-    await session.runtime.stop();
-    await fs.rm(session.temporary, { recursive: true, force: true });
     return true;
   }
 

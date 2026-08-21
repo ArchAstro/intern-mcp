@@ -39,6 +39,8 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     });
     expect(client.getInstructions()).toMatch(/intern_prepare_site/);
     expect(client.getInstructions()).toMatch(/never stages or commits/i);
+    expect(client.getInstructions()).toContain("default-import Client");
+    expect(client.getInstructions()).toContain("Never write globalThis.intern");
 
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
@@ -208,7 +210,20 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     if (request.url === "/api/v1/mcp/session")
       response.end(
         JSON.stringify({
-          user: { id: "usr_1", org: "org_1", org_name: "Acme", org_role: "admin" },
+          user: {
+            id: "usr_1",
+            org: "org_1",
+            org_name: "Acme",
+            org_role: "admin",
+            email: "ada@example.com",
+            name: "Ada",
+            profile_picture: {
+              url: "https://images.test/ada.png",
+              mime_type: "image/png",
+              width: 128,
+              height: 128,
+            },
+          },
           org: { id: "intorg_1", slug: "acme", state: "active" },
         }),
       );
@@ -326,9 +341,50 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     source: "working-tree",
     validation: { valid: true },
   });
-  expect(await (await fetch(localTestResult.test.url)).text()).toBe(
-    "uncommitted local preview\n",
-  );
+  const previewHTML = await (await fetch(localTestResult.test.url)).text();
+  expect(previewHTML).toContain('<script src="/.intern/runtime.js"></script>');
+  expect(previewHTML).toContain("uncommitted local preview\n");
+  const runtimeScript = await (
+    await fetch(new URL("/.intern/runtime.js", localTestResult.test.url))
+  ).text();
+  expect(runtimeScript).toContain("resolveRuntime");
+  expect(runtimeScript).toContain("plugins:Object.freeze({me})");
+  const initialMe = await (
+    await fetch(new URL("/.intern/api/me", localTestResult.test.url))
+  ).json();
+  expect(initialMe).toMatchObject({
+    id: "usr_1",
+    email: "ada@example.com",
+    name: "Ada",
+    profilePicture: {
+      url: "https://images.test/ada.png",
+      contentType: "image/png",
+      width: 128,
+      height: 128,
+    },
+    viewer: { userId: "usr_1", orgId: "org_1", orgSlug: "acme", orgRole: "admin" },
+  });
+  const updatedMe = await (
+    await fetch(new URL("/.intern/api/me", localTestResult.test.url), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Ada Lovelace",
+        profilePicture: {
+          data: "AP8=",
+          contentType: "image/png",
+          filename: "ada.png",
+        },
+      }),
+    })
+  ).json();
+  expect(updatedMe).toMatchObject({
+    name: "Ada Lovelace",
+    profilePicture: {
+      url: "data:image/png;base64,AP8=",
+      contentType: "image/png",
+    },
+  });
   expect(
     await (await fetch(new URL("/untracked.txt", localTestResult.test.url))).text(),
   ).toBe("included untracked edit\n");
@@ -352,7 +408,15 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   });
   const refreshedURL = (refreshed.structuredContent as { test: { url: string } }).test
     .url;
-  expect(await (await fetch(refreshedURL)).text()).toBe("refreshed local preview\n");
+  const refreshedHTML = await (await fetch(refreshedURL)).text();
+  expect(refreshedHTML).toContain('<script src="/.intern/runtime.js"></script>');
+  expect(refreshedHTML).toContain("refreshed local preview\n");
+  expect(
+    await (await fetch(new URL("/.intern/api/me", refreshedURL))).json(),
+  ).toMatchObject({
+    name: "Ada",
+    profilePicture: { url: "https://images.test/ada.png" },
+  });
   const refreshedPreviewTemps = await previewTemporaryDirectories(previewTmp);
   const refreshedCreatedTemps = [...refreshedPreviewTemps].filter(
     (directory) => !previewTempsBefore.has(directory),
