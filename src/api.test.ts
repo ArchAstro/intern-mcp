@@ -34,13 +34,14 @@ describe("Intern runtime contract parsing", () => {
     );
   });
 
-  test("accepts the previous v1 server as a grandfathered checkout file", () => {
+  test("accepts every previous v1 server as a grandfathered checkout file", () => {
     const contract = parseSiteRuntimeContract(canonical);
-    const previous = renderProtectedFile(
-      previousProtectedV1Files["server.mjs"][0],
-      4100,
-    );
-    expect(isAcceptedProtectedFile("server.mjs", previous, contract, 4100)).toBe(true);
+    for (const previousTemplate of previousProtectedV1Files["server.mjs"]) {
+      const previous = renderProtectedFile(previousTemplate, 4100);
+      expect(isAcceptedProtectedFile("server.mjs", previous, contract, 4100)).toBe(
+        true,
+      );
+    }
     expect(
       isAcceptedProtectedFile(
         "server.mjs",
