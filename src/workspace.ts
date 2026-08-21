@@ -15,6 +15,7 @@ import {
 } from "./api.js";
 import {
   missingCommittedBuildOutput,
+  pullLatestInternSDK,
   runLocalSiteBuild,
   validateSite,
   type RunningSiteRuntime,
@@ -71,6 +72,8 @@ interface CheckoutAnchor {
   ino: number;
 }
 
+type SDKPuller = (root: string, packageSpec?: string) => Promise<string>;
+
 export class WorkspaceManager {
   private readonly localTests = new Map<string, LocalSiteTestSession>();
   private readonly testLocks = new Map<string, Promise<void>>();
@@ -81,6 +84,7 @@ export class WorkspaceManager {
   constructor(
     private readonly config: InternConfig,
     private readonly ssh?: SSHCredentialManager,
+    private readonly pullSDK: SDKPuller = pullLatestInternSDK,
   ) {}
 
   async prepare(
@@ -112,6 +116,8 @@ export class WorkspaceManager {
     if (!contract) return status;
     const anchor = await this.openCheckoutAnchor(checkout);
     try {
+      await this.assertCheckoutAnchor(checkout, anchor);
+      await this.pullSDK(checkout, this.config.internSDKPackage);
       await this.assertCheckoutAnchor(checkout, anchor);
       await this.syncRuntimeAndBuild(checkout, site, contract, anchor);
     } finally {

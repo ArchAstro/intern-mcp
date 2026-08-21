@@ -13,6 +13,7 @@ import {
 } from "./api.js";
 
 const exec = promisify(execFile);
+export const publicNPMRegistry = "https://registry.npmjs.org";
 
 export interface ValidationIssue {
   code: string;
@@ -295,7 +296,210 @@ export async function runLocalSiteBuild(root: string): Promise<ValidationIssue[]
     ...asRecord(packageJSON.devDependencies),
     ...asRecord(packageJSON.optionalDependencies),
   });
-  const npmEnvironment = {
+  const environment = npmEnvironment(root);
+  const nodeModules = path.join(root, "node_modules");
+  const removeInstalledModules =
+    installable.length > 0 &&
+    !(await fs
+      .stat(nodeModules)
+      .then(() => true)
+      .catch(() => false));
+  try {
+    if (installable.length > 0) {
+      const lockExists = await fs
+        .stat(path.join(root, "package-lock.json"))
+        .then((info) => info.isFile())
+        .catch(() => false);
+      try {
+        await exec(
+          "npm",
+          [
+            lockExists ? "ci" : "install",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+          ],
+          {
+            cwd: root,
+            timeout: 120_000,
+            maxBuffer: 4 * 1024 * 1024,
+            env: environment,
+          },
+        );
+      } catch (cause) {
+        return [
+          error(
+            "local_package_install_failed",
+            `Local package install failed: ${message(cause)}`,
+            "package.json",
+          ),
+        ];
+      }
+    }
+    if (typeof asRecord(packageJSON.scripts).build !== "string") return [];
+    try {
+      await exec("npm", ["run", "build"], {
+        cwd: root,
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+        env: environment,
+      });
+    } catch (cause) {
+      return [
+        error(
+          "local_build_failed",
+          `Local site build failed: ${message(cause)}`,
+          "package.json",
+        ),
+      ];
+    }
+    return [];
+  } finally {
+    if (removeInstalledModules) {
+      await fs.rm(nodeModules, { recursive: true, force: true });
+    }
+  }
+}
+
+export async function pullLatestInternSDK(
+  root: string,
+  packageSpec = "@archastro/intern-sdk@latest",
+  run: typeof exec = exec,
+): Promise<string> {
+  const sandboxRoot = await fs.mkdtemp(path.join(os.tmpdir(), "intern-sdk-npm-"));
+  const sandbox = path.join(sandboxRoot, path.basename(root));
+  await fs.mkdir(sandbox);
+  try {
+    const packageSource = await readRegularPackageFile(root, "package.json", true);
+    const lockSource = await readRegularPackageFile(root, "package-lock.json", false);
+    await fs.writeFile(path.join(sandbox, "package.json"), packageSource.contents);
+    if (lockSource) {
+      await fs.writeFile(path.join(sandbox, "package-lock.json"), lockSource.contents);
+    }
+
+    try {
+      await run(
+        "npm",
+        [
+          "install",
+          "--package-lock-only",
+          "--save-dev",
+          "--save-exact",
+          "--ignore-scripts",
+          "--no-audit",
+          "--no-fund",
+          "--prefer-online",
+          `--@archastro:registry=${publicNPMRegistry}`,
+          packageSpec,
+        ],
+        {
+          cwd: sandbox,
+          timeout: 120_000,
+          maxBuffer: 4 * 1024 * 1024,
+          env: npmEnvironment(sandbox),
+        },
+      );
+    } catch (cause) {
+      throw new Error(
+        `SDK_INSTALL_FAILED: could not resolve ${packageSpec} from public npm`,
+        { cause },
+      );
+    }
+
+    const resolvedPackage = await readRegularPackageFile(sandbox, "package.json", true);
+    const resolvedLock = await readRegularPackageFile(
+      sandbox,
+      "package-lock.json",
+      true,
+    );
+    const packageJSON = JSON.parse(resolvedPackage.contents.toString("utf8")) as {
+      devDependencies?: Record<string, unknown>;
+    };
+    const pinned = packageJSON.devDependencies?.["@archastro/intern-sdk"];
+    if (
+      typeof pinned !== "string" ||
+      pinned === "latest" ||
+      pinned.endsWith("@latest")
+    ) {
+      throw new Error("SDK_INSTALL_FAILED: npm did not pin @archastro/intern-sdk");
+    }
+
+    await writeAtomicPackageFile(
+      root,
+      "package-lock.json",
+      resolvedLock.contents,
+      lockSource?.mode ?? 0o644,
+    );
+    await writeAtomicPackageFile(
+      root,
+      "package.json",
+      resolvedPackage.contents,
+      packageSource.mode,
+    );
+    return pinned;
+  } finally {
+    await fs.rm(sandboxRoot, { recursive: true, force: true });
+  }
+}
+
+async function readRegularPackageFile(
+  root: string,
+  name: "package.json" | "package-lock.json",
+  required: true,
+): Promise<{ contents: Buffer; mode: number }>;
+async function readRegularPackageFile(
+  root: string,
+  name: "package.json" | "package-lock.json",
+  required: false,
+): Promise<{ contents: Buffer; mode: number } | undefined>;
+async function readRegularPackageFile(
+  root: string,
+  name: "package.json" | "package-lock.json",
+  required: boolean,
+): Promise<{ contents: Buffer; mode: number } | undefined> {
+  const target = path.join(root, name);
+  const before = await fs.lstat(target).catch((cause: NodeJS.ErrnoException) => {
+    if (!required && cause.code === "ENOENT") return undefined;
+    throw cause;
+  });
+  if (!before) return undefined;
+  if (!before.isFile()) {
+    throw new Error(`SDK_INSTALL_FAILED: ${name} must be a regular file`);
+  }
+  const handle = await fs.open(target, "r");
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error(`SDK_INSTALL_FAILED: ${name} changed during SDK resolution`);
+    }
+    return { contents: await handle.readFile(), mode: before.mode & 0o777 };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeAtomicPackageFile(
+  root: string,
+  name: "package.json" | "package-lock.json",
+  contents: Buffer,
+  mode: number,
+): Promise<void> {
+  const temporary = path.join(root, `.intern-${randomUUID()}-${name}`);
+  const handle = await fs.open(temporary, "wx", mode);
+  try {
+    await handle.writeFile(contents);
+  } finally {
+    await handle.close();
+  }
+  try {
+    await fs.rename(temporary, path.join(root, name));
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+
+function npmEnvironment(root: string): NodeJS.ProcessEnv {
+  return {
     ...Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !key.startsWith("npm_")),
     ),
@@ -304,50 +508,6 @@ export async function runLocalSiteBuild(root: string): Promise<ValidationIssue[]
     npm_config_fund: "false",
     npm_config_audit: "false",
   };
-  if (installable.length > 0) {
-    const lockExists = await fs
-      .stat(path.join(root, "package-lock.json"))
-      .then((info) => info.isFile())
-      .catch(() => false);
-    try {
-      await exec(
-        "npm",
-        [lockExists ? "ci" : "install", "--ignore-scripts", "--no-audit", "--no-fund"],
-        {
-          cwd: root,
-          timeout: 120_000,
-          maxBuffer: 4 * 1024 * 1024,
-          env: npmEnvironment,
-        },
-      );
-    } catch (cause) {
-      return [
-        error(
-          "local_package_install_failed",
-          `Local package install failed: ${message(cause)}`,
-          "package.json",
-        ),
-      ];
-    }
-  }
-  if (typeof asRecord(packageJSON.scripts).build !== "string") return [];
-  try {
-    await exec("npm", ["run", "build"], {
-      cwd: root,
-      timeout: 120_000,
-      maxBuffer: 4 * 1024 * 1024,
-      env: npmEnvironment,
-    });
-  } catch (cause) {
-    return [
-      error(
-        "local_build_failed",
-        `Local site build failed: ${message(cause)}`,
-        "package.json",
-      ),
-    ];
-  }
-  return [];
 }
 
 export async function missingCommittedBuildOutput(

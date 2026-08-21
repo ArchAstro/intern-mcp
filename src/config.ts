@@ -9,6 +9,7 @@ export const PACKAGE_VERSION = (
 ).version;
 
 export const DEFAULT_INTERN_BASE_URL = "https://tryintern.dev";
+export const DEFAULT_INTERN_SDK_PACKAGE = "@archastro/intern-sdk@latest";
 
 export interface InternConfig {
   internBaseURL: string;
@@ -16,6 +17,7 @@ export interface InternConfig {
   configRoot: string;
   gitSSHCommand?: string;
   iapIDToken?: string;
+  internSDKPackage?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): InternConfig {
@@ -29,6 +31,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): InternConfig {
     ),
     gitSSHCommand: env.INTERN_GIT_SSH_COMMAND,
     iapIDToken: env.INTERN_IAP_ID_TOKEN ?? env.IAP_ID_TOKEN,
+    internSDKPackage: env.INTERN_SDK_PACKAGE ?? DEFAULT_INTERN_SDK_PACKAGE,
   };
 }
 

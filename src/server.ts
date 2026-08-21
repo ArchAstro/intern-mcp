@@ -158,7 +158,7 @@ export function buildServer(
     {
       title: "Prepare Intern checkout",
       description:
-        "Clone or validate an Intern site's guarded local checkout and return its absolute path. Remote creation occurs only when createIfMissing is true.",
+        "Clone or validate an Intern site's guarded local checkout, resolve and pin the latest public @archastro/intern-sdk development dependency, and return its absolute path. Remote creation occurs only when createIfMissing is true.",
       inputSchema: z.object({
         site: siteSlug,
         createIfMissing: z

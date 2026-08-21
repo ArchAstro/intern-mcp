@@ -234,12 +234,20 @@ describe("WorkspaceManager", () => {
     await exec("git", ["push", "origin", "HEAD:main"], { cwd: seed });
     await exec("git", ["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: remote });
 
-    const manager = new WorkspaceManager({
-      internBaseURL: "",
-      archAstroBaseURL: "",
-      workspaceRoot: path.join(root, "workspaces"),
-      configRoot: path.join(root, "config"),
-    });
+    const sdkPulls: string[] = [];
+    const manager = new WorkspaceManager(
+      {
+        internBaseURL: "",
+        archAstroBaseURL: "",
+        workspaceRoot: path.join(root, "workspaces"),
+        configRoot: path.join(root, "config"),
+      },
+      undefined,
+      async (checkout) => {
+        sdkPulls.push(checkout);
+        return "0.1.0";
+      },
+    );
     const site = {
       slug: "docs",
       orgSlug: "acme",
@@ -251,6 +259,7 @@ describe("WorkspaceManager", () => {
     // Prepare upgrades the previous protected server in the checkout so the
     // next commit can pick up MIME and dist-root serving. HEAD stays grandfathered.
     const prepared = await manager.prepare("acme", site, contract);
+    expect(sdkPulls).toEqual([prepared.path]);
     expect(await fs.readFile(path.join(prepared.path, "server.mjs"), "utf8")).toBe(
       renderProtectedFile(contract.protectedFiles["server.mjs"], 4100),
     );
