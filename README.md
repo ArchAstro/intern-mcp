@@ -201,7 +201,13 @@ The same launcher exposes the standalone commands for manual checks:
 INTERN_PLATFORM_WORKSPACE=../firstlanding-wt2 scripts/run-local.sh status
 ```
 
-After edits, call `intern_test_site` before committing. It validates tracked and untracked working-tree files, excludes ignored files, skips tracked files that were deleted on disk, and returns an ephemeral `http://127.0.0.1:<port>` preview URL. When the site has a `build` script, the MCP installs `devDependencies` locally, runs that build, and writes `dist/` into the checkout so it can be committed. Compatible Intern-owned runtime file upgrades are written the same way. The URL serves a temporary snapshot, so call the tool again after further edits. `intern_stop_test` stops it without needing the backend or a current token. Stdio shutdown also stops every preview and removes its snapshot.
+After edits, call `intern_test_site` before committing. It validates tracked and untracked working-tree files, excludes ignored files, skips tracked files that were deleted on disk, and returns an ephemeral `http://127.0.0.1:<port>` preview URL. When the site has a `build` script, the MCP installs `devDependencies` locally, runs that build, and writes `dist/` into the checkout so it can be committed. Compatible Intern-owned runtime file upgrades are written the same way. The preview host serves the snapshot unchanged behind a loopback proxy, injects the `globalThis.intern` runtime resolver before application modules, and backs `client.me` with an MCP-owned in-memory sandbox. The runtime bootstrap and sandbox never enter the checkout or committed build. Calling the tool again replaces both the snapshot and sandbox. `intern_stop_test` stops them without needing the backend or a current token. Stdio shutdown also stops every preview and removes its snapshot.
+
+Site code that needs the current user installs `@archastro/intern-sdk` as a
+`devDependency`, default-imports `Client`, and uses `new Client().me`. It must
+not add a local adapter, production adapter, or `globalThis.intern` assignment
+to the repository. Vite bundles the SDK into `dist/`; local and production
+hosts inject their implementations outside those committed bytes.
 
 Once the local result is correct, commit the change — including `dist/` when the preview wrote it — and call `intern_validate_site`. It checks the exact committed tree: required and protected runtime files, dependencies the backend does not install, committed build output when a build script exists, JavaScript syntax, production-style startup, and an HTTP probe. `intern_publish_site` reruns the same commit validation and refuses invalid or dirty worktrees. The MCP never stages or commits files. The tenant serves the committed tree and does not install packages or build.
 
@@ -218,6 +224,16 @@ Run the complete local gate from the repository root:
 ```sh
 npm run check
 ```
+
+When changing the injected SDK protocol, build the sibling SDK and run the
+cross-repository proof:
+
+```sh
+npm run test:sdk
+```
+
+Pass a sibling checkout path only while developing both repositories before
+the MCP dependency is pinned to a reviewed SDK commit.
 
 It checks formatting and lint, builds TypeScript, runs the test suite, packs the
 npm artifact, installs it into a clean temporary consumer,

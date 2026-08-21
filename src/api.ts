@@ -11,6 +11,14 @@ export interface InternSession {
     org: string;
     org_name: string;
     org_role: "admin" | "member" | "viewer";
+    email?: string | null;
+    name?: string | null;
+    profile_picture?: {
+      url?: string | null;
+      mime_type?: string | null;
+      width?: number | null;
+      height?: number | null;
+    } | null;
   };
   org: {
     id: string;

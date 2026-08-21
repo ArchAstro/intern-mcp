@@ -22,6 +22,7 @@ const SERVER_INSTRUCTIONS = [
   "1. intern_auth_status — confirm the configured token resolves to the expected user and organization.",
   "2. intern_prepare_site — clone or reuse the checkout; edit files at the returned absolute path with the host's filesystem tools.",
   "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. It skips deleted tracked files, upgrades Intern-owned runtime files, installs devDependencies locally, runs the site build script when present, and writes dist/ into the checkout. Call it again after further edits. intern_stop_test stops it.",
+  "For current-user features, add @archastro/intern-sdk as a devDependency, default-import Client, construct new Client(), and use client.me. Never write globalThis.intern, a memory adapter, a gateway adapter, or other runtime selection into the checkout. intern_test_site injects the local runtime outside the snapshot; the production host supplies its implementation to the same committed bundle.",
   "4. Commit with the host's git, including dist/ when intern_test_site wrote it, then intern_validate_site against Intern's runtime contract.",
   "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation. The tenant does not install packages or build.",
   "Use intern_list_sites and intern_site_status to inspect. Setup users rotate access by rerunning setup and restarting the host; manual users update INTERN_ACCESS_TOKEN and restart it.",
@@ -33,6 +34,17 @@ const sessionSchema = z.object({
     org: z.string(),
     org_name: z.string(),
     org_role: z.enum(["admin", "member", "viewer"]),
+    email: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
+    profile_picture: z
+      .object({
+        url: z.string().nullable().optional(),
+        mime_type: z.string().nullable().optional(),
+        width: z.number().nullable().optional(),
+        height: z.number().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
   }),
   org: z.object({ id: z.string(), slug: z.string(), state: z.string() }),
 });
@@ -262,6 +274,7 @@ export function buildServer(
           session.org.slug,
           site,
           await api.runtimeContract(),
+          session,
         );
         return result({ site, ...tested });
       });

@@ -279,7 +279,9 @@ describe("WorkspaceManager", () => {
       const svg = await fetch(new URL("/icon.svg", preview.test.url));
       expect(svg.status).toBe(200);
       expect(svg.headers.get("content-type")).toBe("image/svg+xml");
-      expect(await (await fetch(preview.test.url)).text()).toBe("built page\n");
+      const html = await (await fetch(preview.test.url)).text();
+      expect(html).toContain('<script src="/.intern/runtime.js"></script>');
+      expect(html).toContain("built page\n");
     } finally {
       await manager.stopTestBySlug("docs");
     }
