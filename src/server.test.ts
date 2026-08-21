@@ -197,6 +197,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     gitUrl: remote,
   };
   let backendRequestCount = 0;
+  let meInstallationPuts = 0;
   let blockedSiteList: { started(): void; wait: Promise<void> } | undefined;
   const backend = http.createServer(async (request, response) => {
     backendRequestCount += 1;
@@ -227,7 +228,24 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
           org: { id: "intorg_1", slug: "acme", state: "active" },
         }),
       );
-    else if (request.url === "/api/v1/mcp/sites") {
+    else if (
+      request.url === "/api/v1/mcp/sites/docs/plugins/me" &&
+      request.method === "PUT"
+    ) {
+      meInstallationPuts += 1;
+      response.end(
+        JSON.stringify({
+          installation: {
+            binding: "me",
+            plugin: "me",
+            protocolVersion: 1,
+            config: {},
+            state: "active",
+            errorCode: null,
+          },
+        }),
+      );
+    } else if (request.url === "/api/v1/mcp/sites") {
       const blocked = blockedSiteList;
       blockedSiteList = undefined;
       if (blocked) {
@@ -304,6 +322,15 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   expect(structured.validation.valid, JSON.stringify(prepared.structuredContent)).toBe(
     true,
   );
+  const preparedAgain = await client.callTool({
+    name: "intern_prepare_site",
+    arguments: { site: "docs" },
+  });
+  expect(preparedAgain.structuredContent).toMatchObject({
+    workspace: { path: structured.workspace.path },
+    validation: { valid: true },
+  });
+  expect(meInstallationPuts).toBe(2);
   const resources = await client.listResources();
   expect(resources.resources.map((resource) => resource.uri)).toContain(
     "intern://sites/docs/workspace",
