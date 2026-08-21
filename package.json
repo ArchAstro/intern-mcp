@@ -1,6 +1,6 @@
 {
   "name": "@archastro/intern-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP server for building and publishing TryIntern sites",
   "type": "module",
   "engines": {
