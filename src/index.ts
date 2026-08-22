@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { AuthClient } from "./auth.js";
+import { refreshInstalledDefaultRules } from "./default-rule.js";
 import { InternAPI } from "./api.js";
 import { loadConfig } from "./config.js";
 import { buildServer } from "./server.js";
@@ -25,12 +26,17 @@ switch (command) {
   case "serve":
     await serveUntilClosed(new AuthClient(), diagnostics);
     break;
-  case "launch":
+  case "launch": {
+    const refreshed = await refreshInstalledDefaultRules(process.env);
+    if (refreshed.length > 0) {
+      diagnostics?.(`Refreshed Intern default rule: ${refreshed.join(", ")}`);
+    }
     await serveUntilClosed(
       new AuthClient(await readStoredAccessToken(config)),
       diagnostics,
     );
     break;
+  }
   case "status":
     process.stdout.write(
       `${JSON.stringify(await new InternAPI(config, new AuthClient(), fetch, diagnostics).session(), null, 2)}\n`,

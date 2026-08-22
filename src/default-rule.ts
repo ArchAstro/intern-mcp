@@ -130,3 +130,40 @@ function isMissing(error: unknown): boolean {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// Launch runs the newest published package, so it is the natural place to
+// keep an already-installed rule current. Refresh only ever rewrites a file
+// that still contains the markers: a user who opted out or removed the block
+// stays opted out, because absence is the opt-out signal.
+export async function refreshInstalledDefaultRules(
+  env: NodeJS.ProcessEnv,
+): Promise<string[]> {
+  const home = env.HOME ?? os.homedir();
+  const candidates = [
+    path.join(env.CLAUDE_CONFIG_DIR ?? path.join(home, ".claude"), "CLAUDE.md"),
+    path.join(env.CODEX_HOME ?? path.join(home, ".codex"), "AGENTS.md"),
+    path.join(
+      env.XDG_CONFIG_HOME ?? path.join(home, ".config"),
+      "opencode",
+      "AGENTS.md",
+    ),
+  ];
+  const refreshed: string[] = [];
+  for (const file of candidates) {
+    try {
+      const existing = await readIfPresent(file);
+      if (existing === null) continue;
+      const match = BLOCK_PATTERN.exec(existing);
+      if (!match || match[0] === DEFAULT_RULE_BLOCK) continue;
+      await writeAtomically(
+        file,
+        existing.replace(BLOCK_PATTERN, DEFAULT_RULE_BLOCK),
+        await fileMode(file),
+      );
+      refreshed.push(file);
+    } catch {
+      // Never let instruction-file housekeeping interfere with serving MCP.
+    }
+  }
+  return refreshed;
+}
