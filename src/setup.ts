@@ -8,6 +8,12 @@ import { promisify } from "node:util";
 import type { InternSession } from "./api.js";
 import { PACKAGE_VERSION, type InternConfig } from "./config.js";
 import {
+  DEFAULT_RULE_BLOCK,
+  defaultRuleFile,
+  installDefaultRule,
+  removeDefaultRule,
+} from "./default-rule.js";
+import {
   configureHost,
   HOST_DISPLAY_NAME,
   HostConfigurationCommittedError,
@@ -38,20 +44,33 @@ interface SetupDependencies {
   env?: NodeJS.ProcessEnv;
   verbose?: boolean;
   registry?: string;
+  defaultRule?: "install" | "skip";
 }
 
 export function parseSetupOptions(args: string[]): {
   host: SetupHost;
   verbose: boolean;
   registry?: string;
+  defaultRule: "install" | "skip" | "remove";
 } {
   let host: SetupHost | undefined;
   let verbose = false;
   let registry: string | undefined;
+  let defaultRule: "install" | "skip" | "remove" = "install";
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (value === "--verbose") {
       verbose = true;
+      continue;
+    }
+    if (value === "--no-default-rule") {
+      if (defaultRule !== "install") throw new Error(setupUsage());
+      defaultRule = "skip";
+      continue;
+    }
+    if (value === "--remove-default-rule") {
+      if (defaultRule !== "install") throw new Error(setupUsage());
+      defaultRule = "remove";
       continue;
     }
     if (value === "--registry" || value.startsWith("--registry=")) {
@@ -73,7 +92,7 @@ export function parseSetupOptions(args: string[]): {
     host = hostValue;
   }
   if (!host) throw new Error(setupUsage());
-  return { host, verbose, ...(registry ? { registry } : {}) };
+  return { host, verbose, defaultRule, ...(registry ? { registry } : {}) };
 }
 
 export async function runSetup(
@@ -112,6 +131,9 @@ export async function runSetup(
         `Intern connected to ${hostName} as ${session.user.org_name} · ${session.user.org_role}.\nRestart ${hostName}, then ask it to run intern_auth_status.\n`,
       );
       if (extra) write(extra);
+      if ((dependencies.defaultRule ?? "install") === "install") {
+        write(await applyDefaultRule(host, hostName, env));
+      }
     } catch (error) {
       if (!(error instanceof HostConfigurationCommittedError)) {
         await restoreFile(tokenFile, previousToken);
@@ -267,8 +289,40 @@ function stripPasteBrackets(value: string): string {
   return value.split(`${escape}[200~`).join("").split(`${escape}[201~`).join("");
 }
 
+// The default rule is the growth loop: it makes Intern the agent's standing
+// answer for "share this with the team". Installing it is loud, opt-out, and
+// reversible; a config side effect a user cannot see or undo would cost more
+// trust than the rule earns.
+async function applyDefaultRule(
+  host: SetupHost,
+  hostName: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const file = defaultRuleFile(host, env);
+  if (!file) {
+    return `To make Intern ${hostName}'s default for team pages, add this to its instructions:\n${DEFAULT_RULE_BLOCK}\n`;
+  }
+  const outcome = await installDefaultRule(file);
+  if (outcome === "unchanged") return "";
+  return `Made Intern ${hostName}'s default for team pages (${file}).\nUndo anytime: intern-mcp setup --host ${host} --remove-default-rule\n`;
+}
+
+export async function removeDefaultRuleForHost(
+  host: SetupHost,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const file = defaultRuleFile(host, env);
+  if (!file) {
+    return `${HOST_DISPLAY_NAME[host]} has no Intern default rule managed by setup.\n`;
+  }
+  const removed = await removeDefaultRule(file);
+  return removed
+    ? `Removed the Intern default rule from ${file}.\n`
+    : `No Intern default rule found in ${file}.\n`;
+}
+
 function setupUsage(): string {
-  return `Usage: intern-mcp setup --host ${SETUP_HOSTS.join("|")} [--verbose] [--registry URL]`;
+  return `Usage: intern-mcp setup --host ${SETUP_HOSTS.join("|")} [--verbose] [--registry URL] [--no-default-rule | --remove-default-rule]`;
 }
 
 function parseRegistry(value: string | undefined): string {

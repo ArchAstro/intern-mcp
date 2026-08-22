@@ -271,25 +271,30 @@ describe("Intern MCP setup", () => {
     expect(parseSetupOptions(["--host", "codex"])).toEqual({
       host: "codex",
       verbose: false,
+      defaultRule: "install",
     });
     expect(parseSetupOptions(["--verbose", "--host=claude"])).toEqual({
       host: "claude",
       verbose: true,
+      defaultRule: "install",
     });
     expect(
       parseSetupOptions(["--host=codex", "--registry", "https://registry.npmjs.org/"]),
     ).toEqual({
       host: "codex",
       verbose: false,
+      defaultRule: "install",
       registry: "https://registry.npmjs.org",
     });
     expect(parseSetupOptions(["--host", "cursor"])).toEqual({
       host: "cursor",
       verbose: false,
+      defaultRule: "install",
     });
     expect(parseSetupOptions(["--host", "grok"])).toEqual({
       host: "grok",
       verbose: false,
+      defaultRule: "install",
     });
     expect(() => parseSetupOptions(["--host", "windsurf"])).toThrow("Usage:");
     expect(() => parseSetupOptions(["--host", "codex", "--debug"])).toThrow("Usage:");

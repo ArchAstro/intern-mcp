@@ -6,7 +6,12 @@ import { loadConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { WorkspaceManager } from "./workspace.js";
 import { SSHCredentialManager } from "./ssh.js";
-import { parseSetupOptions, readStoredAccessToken, runSetup } from "./setup.js";
+import {
+  parseSetupOptions,
+  readStoredAccessToken,
+  removeDefaultRuleForHost,
+  runSetup,
+} from "./setup.js";
 
 const config = loadConfig();
 const command = process.argv[2] ?? "serve";
@@ -34,9 +39,14 @@ switch (command) {
   case "setup":
     try {
       const options = parseSetupOptions(process.argv.slice(3));
+      if (options.defaultRule === "remove") {
+        process.stdout.write(await removeDefaultRuleForHost(options.host, process.env));
+        break;
+      }
       await runSetup(config, options.host, {
         verbose: options.verbose,
         registry: options.registry,
+        defaultRule: options.defaultRule,
       });
     } catch (error) {
       process.stderr.write(
