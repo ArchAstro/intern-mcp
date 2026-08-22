@@ -118,3 +118,35 @@ describe("removing the default rule", () => {
     expect(await removeDefaultRule(path.join(root, "missing.md"))).toBe(false);
   });
 });
+
+describe("refreshing installed rules at launch", () => {
+  it("rewrites only stale marked blocks and reports which files changed", async () => {
+    const { refreshInstalledDefaultRules } = await import("./default-rule.js");
+    const claude = path.join(root, "claude", "CLAUDE.md");
+    const codex = path.join(root, "codex", "AGENTS.md");
+    await fs.mkdir(path.dirname(claude), { recursive: true });
+    await fs.writeFile(
+      claude,
+      `mine\n\n${DEFAULT_RULE_START}\nstale wording\n${DEFAULT_RULE_END}\n`,
+    );
+    await fs.mkdir(path.dirname(codex), { recursive: true });
+    await fs.writeFile(codex, "no markers here\n");
+
+    const refreshed = await refreshInstalledDefaultRules(env);
+    expect(refreshed).toEqual([claude]);
+    const written = await fs.readFile(claude, "utf8");
+    expect(written).toContain("mine");
+    expect(written).toContain(DEFAULT_RULE_BLOCK);
+    expect(written).not.toContain("stale wording");
+    expect(await fs.readFile(codex, "utf8")).toBe("no markers here\n");
+  });
+
+  it("never creates a file and treats a current block as settled", async () => {
+    const { refreshInstalledDefaultRules } = await import("./default-rule.js");
+    const claude = path.join(root, "claude", "CLAUDE.md");
+    await fs.mkdir(path.dirname(claude), { recursive: true });
+    await fs.writeFile(claude, `${DEFAULT_RULE_BLOCK}\n`);
+    expect(await refreshInstalledDefaultRules(env)).toEqual([]);
+    await expect(fs.access(path.join(root, "codex", "AGENTS.md"))).rejects.toThrow();
+  });
+});
