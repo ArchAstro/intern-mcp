@@ -1,12 +1,14 @@
-import { Client } from "@modelcontextprotocol/client";
-import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { InternSession } from "./api.js";
-import { PACKAGE_VERSION, type InternConfig } from "./config.js";
+import { InternAPI } from "./api.js";
+import { AuthClient } from "./auth.js";
+import { type InternConfig } from "./config.js";
+import { CredentialStore } from "./credential-store.js";
+import { DeviceAuthorization, type OAuthCandidate } from "./device-authorization.js";
 import {
   DEFAULT_RULE_BLOCK,
   defaultRuleFile,
@@ -16,10 +18,10 @@ import {
 import {
   configureHost,
   HOST_DISPLAY_NAME,
-  HostConfigurationCommittedError,
   isSetupHost,
   SETUP_HOSTS,
   type CommandResult,
+  type CommandRunner,
   type SetupHost,
 } from "./setup-hosts.js";
 
@@ -29,17 +31,23 @@ export { SETUP_HOSTS } from "./setup-hosts.js";
 const exec = promisify(execFile);
 const defaultPackage = "@archastro/intern-mcp@latest";
 
-interface FileSnapshot {
-  contents: Buffer;
-  mode: number;
-}
-
 interface SetupDependencies {
   token?: string;
   packageSpec?: string;
   promptToken?: () => Promise<string>;
-  session?: (token: string) => Promise<InternSession>;
-  run?: (command: string, args: string[]) => Promise<CommandResult>;
+  session?: (token: string, signal?: AbortSignal) => Promise<InternSession>;
+  authorization?: {
+    authorize(timeoutMs?: number, signal?: AbortSignal): Promise<OAuthCandidate>;
+  };
+  store?: {
+    commit(candidate: OAuthCandidate, signal?: AbortSignal): Promise<void>;
+  };
+  legacyStore?: {
+    replaceWithLegacy(accessToken: string, signal?: AbortSignal): Promise<void>;
+  };
+  configure?: typeof configureHost;
+  fetch?: typeof fetch;
+  run?: CommandRunner;
   write?: (message: string) => void;
   env?: NodeJS.ProcessEnv;
   verbose?: boolean;
@@ -52,11 +60,13 @@ export function parseSetupOptions(args: string[]): {
   verbose: boolean;
   registry?: string;
   defaultRule: "install" | "skip" | "remove";
+  manualToken?: true;
 } {
   let host: SetupHost | undefined;
   let verbose = false;
   let registry: string | undefined;
   let defaultRule: "install" | "skip" | "remove" = "install";
+  let manualToken = false;
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
     if (value === "--verbose") {
@@ -71,6 +81,11 @@ export function parseSetupOptions(args: string[]): {
     if (value === "--remove-default-rule") {
       if (defaultRule !== "install") throw new Error(setupUsage());
       defaultRule = "remove";
+      continue;
+    }
+    if (value === "--token") {
+      if (manualToken) throw new Error(setupUsage());
+      manualToken = true;
       continue;
     }
     if (value === "--registry" || value.startsWith("--registry=")) {
@@ -92,7 +107,13 @@ export function parseSetupOptions(args: string[]): {
     host = hostValue;
   }
   if (!host) throw new Error(setupUsage());
-  return { host, verbose, defaultRule, ...(registry ? { registry } : {}) };
+  return {
+    host,
+    verbose,
+    defaultRule,
+    ...(registry ? { registry } : {}),
+    ...(manualToken ? { manualToken: true as const } : {}),
+  };
 }
 
 export async function runSetup(
@@ -100,97 +121,182 @@ export async function runSetup(
   host: SetupHost,
   dependencies: SetupDependencies = {},
 ): Promise<InternSession> {
-  const promptToken = dependencies.promptToken ?? promptAccessToken;
+  const cancellation = setupCancellation();
+  let releaseLock: (() => Promise<void>) | undefined;
   const env = dependencies.env ?? process.env;
   const verbose = dependencies.verbose ?? false;
   const registry = dependencies.registry;
-  const token = (
-    dependencies.token ??
-    env.INTERN_ACCESS_TOKEN ??
-    (await promptToken())
-  ).trim();
-  if (!token) throw new Error("An Intern access token is required");
-
-  const session = dependencies.session
-    ? await dependencies.session(token)
-    : await verifyMcp(token, env, verbose);
   const run = dependencies.run ?? runCommand;
+  const configure = dependencies.configure ?? configureHost;
   const packageSpec =
     dependencies.packageSpec ?? env.INTERN_MCP_PACKAGE ?? defaultPackage;
-  const releaseLock = await acquireSetupLock(config.configRoot);
   try {
-    const tokenFile = accessTokenFile(config);
-    const previousToken = await snapshotFile(tokenFile);
-    await writeAccessToken(config, token);
+    cancellation.signal.throwIfAborted();
+    releaseLock = await acquireSetupLock(config.configRoot);
+    cancellation.signal.throwIfAborted();
+    const manualToken = dependencies.token?.trim();
+    let verifiedSession: InternSession;
+    if (manualToken) {
+      verifiedSession = dependencies.session
+        ? await dependencies.session(manualToken, cancellation.signal)
+        : await verifyCandidate(
+            config,
+            manualToken,
+            verbose,
+            dependencies.fetch,
+            cancellation.signal,
+          );
+      cancellation.signal.throwIfAborted();
+      const legacyStore =
+        dependencies.legacyStore ??
+        new CredentialStore(config.configRoot, {
+          platformBaseURL: config.archAstroBaseURL,
+          oauthClientID: config.oauthClientID,
+        });
+      await legacyStore.replaceWithLegacy(manualToken, cancellation.signal);
+    } else {
+      const authorization =
+        dependencies.authorization ??
+        new DeviceAuthorization({
+          platformBaseURL: config.archAstroBaseURL,
+          publishableKey: config.publishableKey,
+          oauthClientID: config.oauthClientID,
+        });
+      const store =
+        dependencies.store ??
+        new CredentialStore(config.configRoot, {
+          platformBaseURL: config.archAstroBaseURL,
+          oauthClientID: config.oauthClientID,
+        });
+      const candidate = await authorization.authorize(undefined, cancellation.signal);
+      cancellation.signal.throwIfAborted();
+      verifiedSession = dependencies.session
+        ? await dependencies.session(candidate.accessToken, cancellation.signal)
+        : await verifyCandidate(
+            config,
+            candidate.accessToken,
+            verbose,
+            dependencies.fetch,
+            cancellation.signal,
+          );
+      cancellation.signal.throwIfAborted();
+      await store.commit(candidate, cancellation.signal);
+    }
+
+    cancellation.signal.throwIfAborted();
+    const extra = await configure(
+      host,
+      packageSpec,
+      registry,
+      env,
+      run,
+      cancellation.signal,
+    );
+    cancellation.signal.throwIfAborted();
+    const write =
+      dependencies.write ?? ((message: string) => process.stdout.write(message));
+    const hostName = HOST_DISPLAY_NAME[host];
+    write(
+      `Intern connected to ${hostName} as ${verifiedSession.user.org_name} · ${verifiedSession.user.org_role}.\n${nextAction(host, extra)}`,
+    );
+    if ((dependencies.defaultRule ?? "install") === "install") {
+      write(await applyDefaultRule(host, hostName, env));
+    }
+    return verifiedSession;
+  } catch (error) {
+    throw cancellation.interruption() ?? error;
+  } finally {
     try {
-      const extra = await configureHost(host, packageSpec, registry, env, run);
-      const write =
-        dependencies.write ?? ((message: string) => process.stdout.write(message));
-      const hostName = HOST_DISPLAY_NAME[host];
-      write(
-        `Intern connected to ${hostName} as ${session.user.org_name} · ${session.user.org_role}.\nRestart ${hostName}, then ask it to run intern_auth_status.\n`,
-      );
-      if (extra) write(extra);
-      if ((dependencies.defaultRule ?? "install") === "install") {
-        write(await applyDefaultRule(host, hostName, env));
-      }
-    } catch (error) {
-      if (!(error instanceof HostConfigurationCommittedError)) {
-        await restoreFile(tokenFile, previousToken);
-      }
-      throw error;
+      await releaseLock?.();
+    } finally {
+      cancellation.dispose();
     }
-    return session;
-  } finally {
-    await releaseLock();
   }
 }
 
-async function verifyMcp(
-  token: string,
-  env: NodeJS.ProcessEnv,
-  verbose: boolean,
-): Promise<InternSession> {
-  const entry = fileURLToPath(new URL("./index.js", import.meta.url));
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [entry, "serve"],
-    env: {
-      ...process.env,
-      ...env,
-      INTERN_ACCESS_TOKEN: token,
-      ...(verbose ? { INTERN_MCP_VERBOSE: "1" } : {}),
+export class SetupInterruptedError extends Error {
+  readonly exitCode: number;
+
+  constructor(readonly signal: "SIGINT" | "SIGTERM") {
+    super(`setup interrupted by ${signal}`);
+    this.name = "SetupInterruptedError";
+    this.exitCode = signal === "SIGINT" ? 130 : 143;
+  }
+}
+
+function setupCancellation(): {
+  signal: AbortSignal;
+  interruption: () => SetupInterruptedError | undefined;
+  dispose: () => void;
+} {
+  const controller = new AbortController();
+  let interruption: SetupInterruptedError | undefined;
+  const handlers = new Map<"SIGINT" | "SIGTERM", () => void>();
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = () => {
+      if (interruption) return;
+      interruption = new SetupInterruptedError(signal);
+      controller.abort(interruption);
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return {
+    signal: controller.signal,
+    interruption: () => interruption,
+    dispose: () => {
+      for (const [signal, handler] of handlers) {
+        process.removeListener(signal, handler);
+      }
     },
-    stderr: verbose ? "inherit" : "pipe",
-  });
-  const client = new Client({ name: "intern-setup", version: PACKAGE_VERSION });
-  await client.connect(transport);
-  try {
-    const response = await client.callTool({
-      name: "intern_auth_status",
-      arguments: {},
-    });
-    const result = response.structuredContent as
-      | { authorized?: boolean; session?: InternSession }
-      | undefined;
-    if (result?.authorized !== true || !result.session) {
-      throw new Error("Intern rejected this access token");
-    }
-    return result.session;
-  } finally {
-    await client.close();
-  }
+  };
 }
 
-async function runCommand(command: string, args: string[]): Promise<CommandResult> {
+async function verifyCandidate(
+  config: InternConfig,
+  token: string,
+  verbose: boolean,
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<InternSession> {
+  const diagnostic = verbose
+    ? (line: string) => process.stderr.write(`${line}\n`)
+    : undefined;
+  return new InternAPI(config, new AuthClient(token), fetchFn, diagnostic).session(
+    signal,
+  );
+}
+
+function nextAction(host: SetupHost, hostInstruction?: string): string {
+  if (host === "pi") {
+    return `${hostInstruction ?? "Pi requires its MCP adapter: pi install npm:pi-mcp-adapter\n"}Start a new Pi session, then ask it to run intern_auth_status.\n`;
+  }
+  const sessionName: Record<Exclude<SetupHost, "pi">, string> = {
+    codex: "Codex task",
+    claude: "Claude Code session",
+    grok: "Grok session",
+    cursor: "Cursor session",
+    opencode: "OpenCode session",
+    rovodev: "Rovo Dev session",
+  };
+  return `Start a new ${sessionName[host]}, then ask it to run intern_auth_status.\n`;
+}
+
+async function runCommand(
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<CommandResult> {
   try {
     const result = await exec(command, args, {
       env: process.env,
       timeout: 120_000,
       maxBuffer: 4 * 1024 * 1024,
+      signal,
     });
     return { status: 0, stdout: result.stdout };
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     const status =
       typeof error === "object" && error !== null && "code" in error
         ? Number(error.code) || 1
@@ -322,7 +428,7 @@ export async function removeDefaultRuleForHost(
 }
 
 function setupUsage(): string {
-  return `Usage: intern-mcp setup --host ${SETUP_HOSTS.join("|")} [--verbose] [--registry URL] [--no-default-rule | --remove-default-rule]`;
+  return `Usage: intern-mcp setup --host ${SETUP_HOSTS.join("|")} [--token] [--verbose] [--registry URL] [--no-default-rule | --remove-default-rule]`;
 }
 
 function parseRegistry(value: string | undefined): string {
@@ -349,18 +455,6 @@ export async function readStoredAccessToken(config: InternConfig): Promise<strin
   return token;
 }
 
-async function writeAccessToken(config: InternConfig, token: string): Promise<void> {
-  await fs.mkdir(config.configRoot, { recursive: true, mode: 0o700 });
-  const file = accessTokenFile(config);
-  const temporary = path.join(
-    config.configRoot,
-    `.access-token.${process.pid}.${Date.now()}`,
-  );
-  await fs.writeFile(temporary, `${token}\n`, { mode: 0o600 });
-  await fs.rename(temporary, file);
-  await fs.chmod(file, 0o600);
-}
-
 function accessTokenFile(config: InternConfig): string {
   return path.join(config.configRoot, "access-token");
 }
@@ -370,17 +464,16 @@ async function acquireSetupLock(configRoot: string): Promise<() => Promise<void>
   const lockFile = path.join(configRoot, "setup.lock");
   try {
     const handle = await fs.open(lockFile, "wx", 0o600);
-    await handle.writeFile(`${process.pid}\n`);
+    const ownership = `${JSON.stringify({ pid: process.pid, token: randomUUID() })}\n`;
+    await handle.writeFile(ownership);
     return async () => {
       await handle.close();
-      await fs.rm(lockFile, { force: true });
+      const current = await fs.readFile(lockFile, "utf8").catch(() => undefined);
+      if (current === ownership) await fs.rm(lockFile, { force: true });
     };
   } catch (error) {
     if (!isExists(error)) throw error;
-    const owner = Number.parseInt(
-      await fs.readFile(lockFile, "utf8").catch(() => ""),
-      10,
-    );
+    const owner = setupLockOwner(await fs.readFile(lockFile, "utf8").catch(() => ""));
     if (owner > 0 && processIsAlive(owner)) {
       throw new Error("Another Intern setup is already running");
     }
@@ -388,6 +481,16 @@ async function acquireSetupLock(configRoot: string): Promise<() => Promise<void>
       `A stale Intern setup lock exists at ${lockFile}; remove it and retry`,
     );
   }
+}
+
+function setupLockOwner(contents: string): number {
+  try {
+    const value = JSON.parse(contents) as { pid?: unknown };
+    if (typeof value.pid === "number") return value.pid;
+  } catch {
+    // Accept the original PID-only lock format during migration.
+  }
+  return Number.parseInt(contents, 10);
 }
 
 function processIsAlive(pid: number): boolean {
@@ -402,32 +505,6 @@ function processIsAlive(pid: number): boolean {
       error.code === "ESRCH"
     );
   }
-}
-
-async function snapshotFile(file: string): Promise<FileSnapshot | null> {
-  try {
-    const [contents, stat] = await Promise.all([fs.readFile(file), fs.stat(file)]);
-    return { contents, mode: stat.mode & 0o777 };
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw error;
-  }
-}
-
-async function restoreFile(file: string, snapshot: FileSnapshot | null): Promise<void> {
-  if (!snapshot) {
-    await fs.rm(file, { force: true });
-    return;
-  }
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.intern-setup-${process.pid}-${Date.now()}`;
-  await fs.writeFile(temporary, snapshot.contents, { mode: snapshot.mode });
-  await fs.rename(temporary, file);
-  await fs.chmod(file, snapshot.mode);
-}
-
-function isMissing(error: unknown): boolean {
-  return hasCode(error, "ENOENT");
 }
 
 function isExists(error: unknown): boolean {

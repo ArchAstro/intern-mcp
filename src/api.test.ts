@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   InternAPI,
   isAcceptedProtectedFile,
@@ -8,6 +8,27 @@ import {
   previousProtectedV1Files,
   renderProtectedFile,
 } from "./api.js";
+import type { InternAPIError } from "./api.js";
+
+test("preserves structured Intern API errors", async () => {
+  const api = new InternAPI(
+    {
+      internBaseURL: "https://tryintern.dev",
+      workspaceRoot: "/tmp/workspaces",
+      configRoot: "/tmp/config",
+    },
+    { accessToken: async () => "candidate-token" } as never,
+    async () => Response.json({ error: "org_not_ready" }, { status: 409 }),
+  );
+
+  await expect(api.createSite("docs")).rejects.toEqual(
+    expect.objectContaining<Partial<InternAPIError>>({
+      name: "InternAPIError",
+      status: 409,
+      code: "org_not_ready",
+    }),
+  );
+});
 
 const canonical = JSON.parse(
   await fs.readFile(
@@ -124,3 +145,30 @@ test("verbose diagnostics identify an IAP interception without exposing request 
   expect(output).not.toContain("secret-cookie");
   expect(output).not.toContain("secret-header");
 });
+
+test("session verification forwards caller cancellation to the HTTP request", async () => {
+  const controller = new AbortController();
+  const fetchFn = vi.fn(
+    async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      }),
+  );
+  const api = new InternAPI(
+    {
+      internBaseURL: "https://tryintern.dev",
+      workspaceRoot: "/tmp/workspaces",
+      configRoot: "/tmp/config",
+    },
+    { accessToken: async () => "candidate-token" } as never,
+    fetchFn as typeof fetch,
+  );
+
+  const pending = api.session(controller.signal);
+  await vi.waitFor(() => expect(fetchFn).toHaveBeenCalledOnce());
+  controller.abort(new Error("setup interrupted by SIGINT"));
+
+  await expect(pending).rejects.toThrow("setup interrupted by SIGINT");
+}, 1_000);

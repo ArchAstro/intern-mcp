@@ -7,10 +7,478 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { afterEach, expect, test } from "vitest";
-import type { SiteRuntimeContract } from "./api.js";
-import { PACKAGE_VERSION } from "./config.js";
-import { buildServer } from "./server.js";
+import { afterEach, expect, test, vi } from "vitest";
+import { InternAPI, InternAPIError, type SiteRuntimeContract } from "./api.js";
+import { AuthClient } from "./auth.js";
+import { loadConfig, PACKAGE_VERSION } from "./config.js";
+import { CredentialStore } from "./credential-store.js";
+import { buildServer, prepareInternSite } from "./server.js";
+
+const unprovisionedSession = {
+  user: {
+    id: "usr_1",
+    org: "org_1",
+    org_name: "Acme",
+    org_role: "admin" as const,
+  },
+  org: { id: null, slug: "acme", state: "unprovisioned" },
+};
+
+const activeSession = {
+  ...unprovisionedSession,
+  org: { id: "intorg_1", slug: "acme", state: "active" },
+};
+
+const failedSession = {
+  ...activeSession,
+  org: { ...activeSession.org, state: "failed" },
+};
+
+const destroyedSession = {
+  ...activeSession,
+  org: { ...activeSession.org, state: "destroyed" },
+};
+
+const provisioningSession = {
+  ...activeSession,
+  org: { ...activeSession.org, state: "provisioning" },
+};
+
+const preparedSite = {
+  id: "site_1",
+  orgSlug: "acme",
+  slug: "docs",
+  state: "active",
+  siteType: "vite",
+  port: 4100,
+  url: "https://docs.acme.tryintern.dev",
+  gitUrl: "acme@git.intern.dev:docs.git",
+};
+
+function readinessClock(
+  states: Array<typeof unprovisionedSession | typeof activeSession>,
+) {
+  let now = 0;
+  return {
+    now: () => now,
+    sleep: async (milliseconds: number, signal: AbortSignal) => {
+      if (signal.aborted) throw signal.reason;
+      now += milliseconds;
+    },
+    nextSession: () => states.shift() ?? states.at(-1) ?? unprovisionedSession,
+  };
+}
+
+test("returns provisioning without preparing a checkout while the organization starts", async () => {
+  const clock = readinessClock([]);
+  const workspaces = { prepare: vi.fn(), validate: vi.fn() };
+  const api = {
+    session: vi.fn(async () => unprovisionedSession),
+    listSites: vi.fn(async () => []),
+    createSite: vi.fn(async () => {
+      throw new InternAPIError(409, "org_not_ready", "organization is provisioning");
+    }),
+  };
+
+  const value = await prepareInternSite(
+    api as never,
+    workspaces as never,
+    { site: "docs", createIfMissing: true, siteType: "vite" },
+    clock,
+  );
+
+  expect(value).toMatchObject({
+    status: "provisioning",
+    orgState: "provisioning",
+    retryAfterMs: 5_000,
+  });
+  expect(workspaces.prepare).not.toHaveBeenCalled();
+  expect(workspaces.validate).not.toHaveBeenCalled();
+});
+
+test("returns ready after an organization becomes active", async () => {
+  const clock = readinessClock([unprovisionedSession, activeSession]);
+  const api = {
+    session: vi.fn(async () => clock.nextSession()),
+    listSites: vi.fn(async () => []),
+    createSite: vi
+      .fn()
+      .mockRejectedValueOnce(
+        new InternAPIError(409, "org_not_ready", "organization is provisioning"),
+      )
+      .mockResolvedValueOnce(preparedSite),
+    runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
+  };
+  const workspaces = {
+    prepare: vi.fn(async () => ({ path: "/tmp/docs" })),
+    validate: vi.fn(async () => ({ valid: true })),
+  };
+
+  const value = await prepareInternSite(
+    api as never,
+    workspaces as never,
+    { site: "docs", createIfMissing: true, siteType: "vite" },
+    clock,
+  );
+
+  expect(value).toMatchObject({ status: "ready", site: { slug: "docs" } });
+  expect(api.createSite).toHaveBeenCalledTimes(2);
+  expect(workspaces.prepare).toHaveBeenCalledOnce();
+});
+
+test.each([
+  ["failed", failedSession],
+  ["destroyed", destroyedSession],
+])(
+  "triggers one admin retry for a %s organization and later returns ready",
+  async (_state, initialSession) => {
+    const clock = readinessClock([initialSession, activeSession]);
+    const api = {
+      session: vi.fn(async () => clock.nextSession()),
+      listSites: vi.fn(async () => [preparedSite]),
+      createSite: vi.fn(async () => {
+        throw new InternAPIError(409, "org_not_ready", "organization is provisioning");
+      }),
+      runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
+    };
+    const workspaces = {
+      prepare: vi.fn(async () => ({ path: "/tmp/docs" })),
+      validate: vi.fn(async () => ({ valid: true })),
+    };
+
+    const value = await prepareInternSite(
+      api as never,
+      workspaces as never,
+      { site: "docs", createIfMissing: true, siteType: "vite" },
+      clock,
+    );
+
+    expect(value).toMatchObject({ status: "ready" });
+    expect(value).toMatchObject({ site: preparedSite });
+    expect(api.createSite).toHaveBeenCalledOnce();
+  },
+);
+
+test.each([
+  ["unprovisioned", unprovisionedSession],
+  ["failed", failedSession],
+  ["destroyed", destroyedSession],
+])(
+  "does not claim %s provisioning when the pre-trigger site list exceeds the deadline",
+  async (_state, session) => {
+    vi.useFakeTimers();
+    try {
+      const api = {
+        session: vi.fn(async () => session),
+        listSites: vi.fn(
+          async (signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        ),
+      };
+      const pending = prepareInternSite(api as never, {} as never, {
+        site: "docs",
+        createIfMissing: true,
+        siteType: "vite",
+      });
+      const rejection = expect(pending).rejects.toThrow(
+        "organization readiness timed out",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test.each([
+  ["unprovisioned", unprovisionedSession, []],
+  ["failed", failedSession, [preparedSite]],
+  ["destroyed", destroyedSession, [preparedSite]],
+])(
+  "does not claim %s provisioning when the trigger exceeds the deadline",
+  async (_state, session, sites) => {
+    vi.useFakeTimers();
+    try {
+      const api = {
+        session: vi.fn(async () => session),
+        listSites: vi.fn(async () => sites),
+        createSite: vi.fn(
+          async (_slug: string, _siteType: string, signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        ),
+      };
+      const pending = prepareInternSite(api as never, {} as never, {
+        site: "docs",
+        createIfMissing: true,
+        siteType: "vite",
+      });
+      const rejection = expect(pending).rejects.toThrow(
+        "organization readiness timed out",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("propagates a member refusal when a failed organization needs an admin retry", async () => {
+  const refusal = new InternAPIError(403, "forbidden", "admin role required");
+  const api = {
+    session: vi.fn(async () => failedSession),
+    listSites: vi.fn(async () => [preparedSite]),
+    createSite: vi.fn(async () => {
+      throw refusal;
+    }),
+  };
+
+  await expect(
+    prepareInternSite(
+      api as never,
+      {} as never,
+      { site: "docs", createIfMissing: true, siteType: "vite" },
+      readinessClock([]),
+    ),
+  ).rejects.toBe(refusal);
+  expect(api.createSite).toHaveBeenCalledOnce();
+});
+
+test("does not retrigger an organization that is already provisioning", async () => {
+  const clock = readinessClock([provisioningSession, activeSession]);
+  const api = {
+    session: vi.fn(async () => clock.nextSession()),
+    listSites: vi.fn(async () => []),
+    createSite: vi.fn(async () => preparedSite),
+    runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
+  };
+
+  await expect(
+    prepareInternSite(
+      api as never,
+      {
+        prepare: vi.fn(async () => ({ path: "/tmp/docs" })),
+        validate: vi.fn(async () => ({ valid: true })),
+      } as never,
+      { site: "docs", createIfMissing: true, siteType: "vite" },
+      clock,
+    ),
+  ).resolves.toMatchObject({ status: "ready" });
+  expect(api.createSite).toHaveBeenCalledOnce();
+});
+
+test("bounds the organization-readiness phase", async () => {
+  const clock = readinessClock([]);
+  const signals: AbortSignal[] = [];
+  const api = {
+    session: vi.fn(async (signal: AbortSignal) => {
+      signals.push(signal);
+      return unprovisionedSession;
+    }),
+    listSites: vi.fn(async (signal: AbortSignal) => {
+      signals.push(signal);
+      return [];
+    }),
+    createSite: vi.fn(async (_slug: string, _siteType: string, signal: AbortSignal) => {
+      signals.push(signal);
+      throw new InternAPIError(409, "org_not_ready", "organization is provisioning");
+    }),
+  };
+
+  const value = await prepareInternSite(
+    api as never,
+    { prepare: vi.fn(), validate: vi.fn() } as never,
+    { site: "docs", createIfMissing: true, siteType: "vite" },
+    clock,
+  );
+
+  expect(value).toMatchObject({ status: "provisioning" });
+  expect(clock.now()).toBe(20_000);
+  expect(new Set(signals).size).toBe(1);
+  expect(signals[0]?.aborted).toBe(true);
+});
+
+test("propagates forbidden, unrelated preconditions, and service outages", async () => {
+  for (const failure of [
+    new InternAPIError(403, "forbidden", "forbidden"),
+    new InternAPIError(409, "site_not_ready", "site deletion in progress"),
+    new InternAPIError(503, "control_unavailable", "control unavailable"),
+  ]) {
+    const api = {
+      session: vi.fn(async () => activeSession),
+      listSites: vi.fn(async () => []),
+      createSite: vi.fn(async () => {
+        throw failure;
+      }),
+    };
+    await expect(
+      prepareInternSite(
+        api as never,
+        {} as never,
+        { site: "docs", createIfMissing: true, siteType: "vite" },
+        readinessClock([]),
+      ),
+    ).rejects.toBe(failure);
+  }
+});
+
+test.each([
+  new InternAPIError(403, "forbidden", "forbidden"),
+  new InternAPIError(409, "site_not_ready", "site deletion in progress"),
+  new InternAPIError(503, "control_unavailable", "control unavailable"),
+])(
+  "propagates timeout-adjacent structured errors instead of returning provisioning",
+  async (failure) => {
+    vi.useFakeTimers();
+    try {
+      let sessionCalls = 0;
+      const api = {
+        session: vi.fn(async (signal: AbortSignal) => {
+          sessionCalls++;
+          if (sessionCalls === 1) return unprovisionedSession;
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(failure), { once: true });
+          });
+        }),
+        listSites: vi.fn(async () => []),
+        createSite: vi.fn(async () => {
+          throw new InternAPIError(
+            409,
+            "org_not_ready",
+            "organization is provisioning",
+          );
+        }),
+      };
+      const pending = prepareInternSite(api as never, {} as never, {
+        site: "docs",
+        createIfMissing: true,
+        siteType: "vite",
+      });
+      const rejection = expect(pending).rejects.toBe(failure);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(19_000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+test("bounds credential refresh lock contention inside organization readiness", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "intern-readiness-auth-"));
+  cleanups.push(() => fs.rm(root, { recursive: true, force: true }));
+  try {
+    const config = loadConfig({
+      HOME: root,
+      INTERN_CONFIG_ROOT: root,
+      INTERN_BASE_URL: "https://tryintern.dev",
+      ARCHASTRO_API_URL: "https://platform.example",
+      ARCHASTRO_PUBLISHABLE_KEY: "pk_public",
+      INTERN_OAUTH_CLIENT_ID: "client_intern",
+    });
+    const store = new CredentialStore(root, {
+      platformBaseURL: config.archAstroBaseURL,
+      oauthClientID: config.oauthClientID,
+    });
+    await store.commit({
+      platformBaseURL: config.archAstroBaseURL,
+      oauthClientID: config.oauthClientID,
+      accessToken: "expired-access",
+      refreshToken: "refresh-token",
+      expiresAtMs: 1,
+      scope: "profile",
+    });
+    await fs.writeFile(
+      path.join(root, "refresh.lock"),
+      `${JSON.stringify({ pid: process.pid, createdAtMs: Date.now(), token: "live-owner" })}\n`,
+      { mode: 0o600 },
+    );
+    vi.useFakeTimers();
+    const refresh = vi.fn(async () => preparedSite as never);
+    const auth = new AuthClient(config, {
+      env: {},
+      store,
+      authorization: { authorize: vi.fn(), refresh } as never,
+    });
+    const api = new InternAPI(config, auth, vi.fn() as never);
+    const pending = prepareInternSite(api, {} as never, {
+      site: "docs",
+      createIfMissing: true,
+      siteType: "vite",
+    });
+    const rejection = expect(pending).rejects.toThrow(
+      "organization readiness timed out",
+    );
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const entries = await fs.readdir(root);
+      if (entries.some((entry) => entry.startsWith(".refresh-intent."))) break;
+      await Promise.resolve();
+    }
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await rejection;
+    expect(refresh).not.toHaveBeenCalled();
+    expect(
+      (await fs.readdir(root)).filter((entry) => entry.startsWith(".refresh-intent.")),
+    ).toEqual([]);
+    await expect(fs.stat(path.join(root, "refresh.lock"))).resolves.toBeTruthy();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("keeps the final post-active site lookup inside the shared readiness deadline", async () => {
+  vi.useFakeTimers();
+  try {
+    let sessionCalls = 0;
+    let listCalls = 0;
+    const signals: AbortSignal[] = [];
+    const api = {
+      session: vi.fn(async () => {
+        sessionCalls++;
+        if (sessionCalls === 1) return provisioningSession;
+        await new Promise((resolve) => setTimeout(resolve, 18_900));
+        return activeSession;
+      }),
+      listSites: vi.fn(async (signal?: AbortSignal) => {
+        listCalls++;
+        if (signal) signals.push(signal);
+        if (listCalls === 1) return [];
+        if (!signal) throw new Error("final readiness lookup lost its deadline");
+        return new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      }),
+    };
+    const pending = prepareInternSite(api as never, {} as never, {
+      site: "docs",
+      createIfMissing: true,
+      siteType: "vite",
+    });
+    const completion = expect(pending).resolves.toMatchObject({
+      status: "provisioning",
+      orgState: "provisioning",
+    });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await completion;
+    expect(listCalls).toBe(2);
+    expect(new Set(signals).size).toBe(1);
+    expect(signals[0]?.aborted).toBe(true);
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 const exec = promisify(execFile);
 const cleanups: Array<() => Promise<void>> = [];

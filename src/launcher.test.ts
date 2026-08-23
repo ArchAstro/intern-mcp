@@ -1,11 +1,26 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { InternConfig } from "./config.js";
+import { loadConfig } from "./config.js";
+import { AuthClient } from "./auth.js";
+import { CredentialStore } from "./credential-store.js";
+import { DeviceAuthorization } from "./device-authorization.js";
 
 const cleanups: Array<() => Promise<unknown>> = [];
 
@@ -31,6 +46,124 @@ async function listen(server: Server): Promise<number> {
 }
 
 describe("local launcher", () => {
+  test("prints only the exact package version without requiring credentials", async () => {
+    const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const packageVersion = JSON.parse(
+      await readFile(path.join(repository, "package.json"), "utf8"),
+    ).version as string;
+    const root = await mkdtemp(path.join(os.tmpdir(), "intern-version-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+
+    const result = spawnSync(
+      process.execPath,
+      [path.join(repository, "dist", "index.js"), "version"],
+      {
+        encoding: "utf8",
+        env: {
+          HOME: root,
+          INTERN_CONFIG_ROOT: path.join(root, "missing-credentials"),
+        },
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`${packageVersion}\n`);
+    expect(result.stderr).toBe("");
+  });
+
+  test("preflights credential resolution before exposing MCP stdio", async () => {
+    const { launchMcp } = await import("./index.js");
+    const order: string[] = [];
+    const auth = {
+      accessToken: vi.fn(async () => {
+        order.push("preflight");
+        return "valid-access-token";
+      }),
+    };
+    const serve = vi.fn(async () => {
+      order.push("serve");
+    });
+
+    await launchMcp({} as InternConfig, { auth, serve });
+
+    expect(order).toEqual(["preflight", "serve"]);
+  }, 1_000);
+
+  test.each(["Stored Intern credentials are corrupt", "session refresh failed"])(
+    "does not expose MCP stdio when preflight fails: %s",
+    async (message) => {
+      const { launchMcp } = await import("./index.js");
+      const serve = vi.fn();
+      const auth = {
+        accessToken: vi.fn(async () => {
+          throw new Error(message);
+        }),
+      };
+
+      await expect(launchMcp({} as InternConfig, { auth, serve })).rejects.toThrow(
+        message,
+      );
+      expect(serve).not.toHaveBeenCalled();
+    },
+  );
+
+  test("does not expose stdio when the real refresh transport times out", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "intern-refresh-timeout-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const config = loadConfig({
+      HOME: root,
+      INTERN_CONFIG_ROOT: path.join(root, "config"),
+      ARCHASTRO_API_URL: "https://platform.example",
+      ARCHASTRO_PUBLISHABLE_KEY: "pk_test",
+      INTERN_OAUTH_CLIENT_ID: "client_test",
+    });
+    const store = new CredentialStore(config.configRoot, {
+      platformBaseURL: config.archAstroBaseURL,
+      oauthClientID: config.oauthClientID,
+    });
+    await store.commit({
+      platformBaseURL: config.archAstroBaseURL,
+      oauthClientID: config.oauthClientID,
+      accessToken: "expired-access",
+      refreshToken: "stalled-refresh",
+      expiresAtMs: 1,
+      scope: "profile",
+    });
+    const authorization = new DeviceAuthorization(
+      {
+        platformBaseURL: config.archAstroBaseURL,
+        publishableKey: config.publishableKey,
+        oauthClientID: config.oauthClientID,
+      },
+      {
+        requestTimeoutMs: 20,
+        fetch: async (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+              once: true,
+            });
+          }),
+      },
+    );
+    const auth = new AuthClient(config, {
+      store,
+      authorization,
+      now: () => 10_000,
+    });
+    const serve = vi.fn();
+    const { launchMcp } = await import("./index.js");
+
+    await expect(launchMcp(config, { auth, serve })).rejects.toThrow(
+      "refresh request timed out",
+    );
+    expect(serve).not.toHaveBeenCalled();
+    expect(
+      (await readdir(config.configRoot)).filter((entry) =>
+        entry.startsWith(".refresh"),
+      ),
+    ).toEqual([]);
+  });
+
   test("starts the MCP from the active worktree Aster ports used by a Devbox Intern stack", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "intern-mcp-launcher-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
