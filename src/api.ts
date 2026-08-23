@@ -87,14 +87,18 @@ const siteRuntimeContractSchema: z.ZodType<SiteRuntimeContract> = z
   })
   .strict();
 
-const protectedV1Hashes: Record<string, string> = {
-  "run-site.sh": "3db0608bf5d67284d33302d78883eee91a849c69f5ece96f7c29a6c31c56bfbd",
-  "server.mjs": "d14f77f567f8fa167267f9a760b71046d50b9a2e6fa32829945003a7d42e7cea",
+const protectedV1Hashes: Record<string, readonly string[]> = {
+  "run-site.sh": ["3db0608bf5d67284d33302d78883eee91a849c69f5ece96f7c29a6c31c56bfbd"],
+  "server.mjs": [
+    "d14f77f567f8fa167267f9a760b71046d50b9a2e6fa32829945003a7d42e7cea",
+    "b23b6319c0963f560453d213d86c9e9fce9a159a243947bccf6c7e9517e5d2a1",
+  ],
 };
 
 /** Earlier intern-node-static-v1 protected files that existing site commits may still contain. */
 export const previousProtectedV1Files: Record<string, string[]> = {
   "server.mjs": [
+    'import {createServer} from "node:http"; import {existsSync} from "node:fs"; import {readFile} from "node:fs/promises"; import {extname,join} from "node:path"; const cwd=process.cwd(); const root=existsSync(join(cwd,"dist","index.html"))?join(cwd,"dist"):cwd; const port=Number(process.env.PORT || {{PORT}}); const types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".json":"application/json; charset=utf-8",".map":"application/json",".svg":"image/svg+xml",".png":"image/png",".jpg":"image/jpeg",".jpeg":"image/jpeg",".gif":"image/gif",".webp":"image/webp",".ico":"image/x-icon",".woff":"font/woff",".woff2":"font/woff2",".ttf":"font/ttf",".txt":"text/plain; charset=utf-8",".wasm":"application/wasm"}; createServer(async (req,res)=>{try{const raw=(req.url||"/").split("?")[0]; const rel=raw==="/"?"index.html":raw.replace(/^\\/+/,""); if(rel.includes("..")) throw new Error("bad path"); let body; try{body=await readFile(join(root,rel))}catch{if(root===cwd) throw new Error("missing"); body=await readFile(join(cwd,rel))} res.writeHead(200,{"content-type":types[extname(rel)]||"application/octet-stream"}); res.end(body)}catch{res.writeHead(404);res.end("not found")}}).listen(Number(process.env.LISTEN_FDS)>0?{fd:3}:{port,host:"127.0.0.1"});\n',
     'import {createServer} from "node:http"; import {existsSync} from "node:fs"; import {readFile} from "node:fs/promises"; import {extname,join} from "node:path"; const cwd=process.cwd(); const root=existsSync(join(cwd,"dist","index.html"))?join(cwd,"dist"):cwd; const port=Number(process.env.PORT || {{PORT}}); const types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".json":"application/json; charset=utf-8",".map":"application/json",".svg":"image/svg+xml",".png":"image/png",".jpg":"image/jpeg",".jpeg":"image/jpeg",".gif":"image/gif",".webp":"image/webp",".ico":"image/x-icon",".woff":"font/woff",".woff2":"font/woff2",".ttf":"font/ttf",".txt":"text/plain; charset=utf-8",".wasm":"application/wasm"}; createServer(async (req,res)=>{try{const raw=(req.url||"/").split("?")[0]; const rel=raw==="/"?"index.html":raw.replace(/^\\/+/,""); if(rel.includes("..")) throw new Error("bad path"); let body; try{body=await readFile(join(root,rel))}catch{if(root===cwd) throw new Error("missing"); body=await readFile(join(cwd,rel))} res.writeHead(200,{"content-type":types[extname(rel)]||"application/octet-stream"}); res.end(body)}catch{res.writeHead(404);res.end("not found")}}).listen(port,"127.0.0.1");\n',
     'import {createServer} from "node:http"; import {readFile} from "node:fs/promises"; import {extname,join} from "node:path"; const root=process.cwd(); const port=Number(process.env.PORT || {{PORT}}); const types={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8"}; createServer(async (req,res)=>{try{const raw=(req.url||"/").split("?")[0]; const rel=raw==="/"?"index.html":raw.replace(/^\\/+/,""); if(rel.includes("..")) throw new Error("bad path"); const body=await readFile(join(root,rel)); res.writeHead(200,{"content-type":types[extname(rel)]||"application/octet-stream"}); res.end(body)}catch{res.writeHead(404);res.end("not found")}}).listen(port,"127.0.0.1");\n',
   ],
@@ -123,7 +127,7 @@ export function parseSiteRuntimeContract(value: unknown): SiteRuntimeContract {
     const actual = createHash("sha256")
       .update(contract.protectedFiles[name])
       .digest("hex");
-    if (actual !== expected)
+    if (!expected.includes(actual))
       throw new Error(
         `Intern runtime contract v1 has unexpected protected content: ${name}`,
       );
