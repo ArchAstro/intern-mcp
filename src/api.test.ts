@@ -16,11 +16,45 @@ const canonical = JSON.parse(
   ),
 ) as Record<string, unknown>;
 
+const previousCanonical = JSON.parse(
+  await fs.readFile(
+    fileURLToPath(
+      new URL("../test/fixtures/runtime-contract-previous.json", import.meta.url),
+    ),
+    "utf8",
+  ),
+) as Record<string, unknown>;
+
+function requestTimeRootContract(): Record<string, unknown> {
+  const contract = structuredClone(previousCanonical) as {
+    protectedFiles: Record<string, string>;
+  };
+  const rootSelection =
+    'const root=existsSync(join(cwd,"dist","index.html"))?join(cwd,"dist"):cwd; ';
+  contract.protectedFiles["server.mjs"] = contract.protectedFiles["server.mjs"]
+    .replace(rootSelection, "")
+    .replace(
+      "createServer(async (req,res)=>{try{",
+      `createServer(async (req,res)=>{try{${rootSelection}`,
+    );
+  return contract;
+}
+
 describe("Intern runtime contract parsing", () => {
   test("accepts the intern-data-owned v1 contract", () => {
     expect(parseSiteRuntimeContract(canonical)).toMatchObject({
       version: "intern-node-static-v1",
       entrypoint: "server.mjs",
+    });
+  });
+
+  test("accepts both runtime contracts during the request-time-root rollout", () => {
+    expect(requestTimeRootContract()).toEqual(canonical);
+    expect(parseSiteRuntimeContract(previousCanonical)).toMatchObject({
+      version: "intern-node-static-v1",
+    });
+    expect(parseSiteRuntimeContract(requestTimeRootContract())).toMatchObject({
+      version: "intern-node-static-v1",
     });
   });
 
