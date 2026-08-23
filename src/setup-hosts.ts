@@ -33,6 +33,12 @@ export interface CommandResult {
   stdout: string;
 }
 
+export type CommandRunner = (
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+) => Promise<CommandResult>;
+
 export class HostConfigurationCommittedError extends Error {}
 
 interface ClaudeEntrySnapshot {
@@ -46,10 +52,13 @@ interface FileSnapshot {
 }
 
 const INTERN_ENV_KEYS = [
+  "ARCHASTRO_API_URL",
+  "ARCHASTRO_PUBLISHABLE_KEY",
   "INTERN_BASE_URL",
   "INTERN_WORKSPACE_ROOT",
   "INTERN_CONFIG_ROOT",
   "INTERN_GIT_SSH_COMMAND",
+  "INTERN_OAUTH_CLIENT_ID",
 ] as const;
 
 export async function configureHost(
@@ -57,8 +66,10 @@ export async function configureHost(
   packageSpec: string,
   registry: string | undefined,
   env: NodeJS.ProcessEnv,
-  run: (command: string, args: string[]) => Promise<CommandResult>,
+  run: CommandRunner,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
+  signal?.throwIfAborted();
   const launcher = internLauncher(packageSpec, registry);
   const savedEnv = internEnv(env);
 
@@ -80,12 +91,13 @@ export async function configureHost(
       committed:
         "Codex saved Intern but could not verify its registration; the new profile was retained",
       run,
+      signal,
     });
     return;
   }
 
   if (host === "claude") {
-    await configureClaude(launcher, savedEnv, env, run);
+    await configureClaude(launcher, savedEnv, env, run, signal);
     return;
   }
 
@@ -111,6 +123,7 @@ export async function configureHost(
       committed:
         "Grok saved Intern but could not verify its registration; the new profile was retained",
       run,
+      signal,
     });
     return;
   }
@@ -197,11 +210,20 @@ async function configureCliHost(options: {
   verify: string[];
   healthy: (stdout: string) => boolean;
   committed: string;
-  run: (command: string, args: string[]) => Promise<CommandResult>;
+  run: CommandRunner;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const added = await options.run(options.add[0]!, options.add.slice(1));
+  const added = await options.run(
+    options.add[0]!,
+    options.add.slice(1),
+    options.signal,
+  );
   if (added.status !== 0) throw new Error(`Could not configure ${options.name}`);
-  const verified = await options.run(options.verify[0]!, options.verify.slice(1));
+  const verified = await options.run(
+    options.verify[0]!,
+    options.verify.slice(1),
+    options.signal,
+  );
   if (verified.status !== 0 || !options.healthy(verified.stdout)) {
     throw new HostConfigurationCommittedError(options.committed);
   }
@@ -211,7 +233,8 @@ async function configureClaude(
   launcher: string[],
   savedEnv: Record<string, string>,
   env: NodeJS.ProcessEnv,
-  run: (command: string, args: string[]) => Promise<CommandResult>,
+  run: CommandRunner,
+  signal?: AbortSignal,
 ): Promise<void> {
   const environmentArgs = Object.entries(savedEnv).flatMap(([name, value]) => [
     "--env",
@@ -221,23 +244,27 @@ async function configureClaude(
   const previousEntry = await readClaudeEntry(configFile);
   let installedEntry: ClaudeEntrySnapshot | undefined;
   try {
-    await run("claude", ["mcp", "remove", "--scope", "user", "intern"]);
-    const added = await run("claude", [
-      "mcp",
-      "add",
-      "--transport",
-      "stdio",
-      "--scope",
-      "user",
-      "intern",
-      ...environmentArgs,
-      "--",
-      ...launcher,
-    ]);
+    await run("claude", ["mcp", "remove", "--scope", "user", "intern"], signal);
+    const added = await run(
+      "claude",
+      [
+        "mcp",
+        "add",
+        "--transport",
+        "stdio",
+        "--scope",
+        "user",
+        "intern",
+        ...environmentArgs,
+        "--",
+        ...launcher,
+      ],
+      signal,
+    );
     if (added.status !== 0) throw new Error("Could not configure Claude Code");
     installedEntry = await readClaudeEntry(configFile);
 
-    const verified = await run("claude", ["mcp", "get", "intern"]);
+    const verified = await run("claude", ["mcp", "get", "intern"], signal);
     const output = stripANSI(verified.stdout);
     const healthy =
       verified.status === 0 &&

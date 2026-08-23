@@ -21,12 +21,28 @@ export interface InternSession {
     } | null;
   };
   org: {
-    id: string;
+    id: string | null;
     slug: string;
     state: string;
     nodeId?: string;
     wildcardDomain?: string;
   };
+}
+
+export class InternAPIError extends Error {
+  readonly name = "InternAPIError";
+
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(
+      status === 401
+        ? `AUTH_REQUIRED: ${message}`
+        : `Intern request failed: ${message}`,
+    );
+  }
 }
 
 export interface InternSite {
@@ -143,8 +159,8 @@ export class InternAPI {
     private readonly diagnostics?: DiagnosticSink,
   ) {}
 
-  session(): Promise<InternSession> {
-    return this.request("/api/v1/mcp/session");
+  session(signal?: AbortSignal): Promise<InternSession> {
+    return this.request("/api/v1/mcp/session", {}, signal);
   }
 
   async runtimeContract(): Promise<SiteRuntimeContract> {
@@ -154,16 +170,28 @@ export class InternAPI {
     return parseSiteRuntimeContract(response.contract);
   }
 
-  async listSites(): Promise<InternSite[]> {
-    const response = await this.request<{ sites?: InternSite[] }>("/api/v1/mcp/sites");
+  async listSites(signal?: AbortSignal): Promise<InternSite[]> {
+    const response = await this.request<{ sites?: InternSite[] }>(
+      "/api/v1/mcp/sites",
+      {},
+      signal,
+    );
     return response.sites ?? [];
   }
 
-  async createSite(slug: string, siteType = "vite"): Promise<InternSite> {
-    const response = await this.request<{ site: InternSite }>("/api/v1/mcp/sites", {
-      method: "POST",
-      body: JSON.stringify({ slug, siteType }),
-    });
+  async createSite(
+    slug: string,
+    siteType = "vite",
+    signal?: AbortSignal,
+  ): Promise<InternSite> {
+    const response = await this.request<{ site: InternSite }>(
+      "/api/v1/mcp/sites",
+      {
+        method: "POST",
+        body: JSON.stringify({ slug, siteType }),
+      },
+      signal,
+    );
     return response.site;
   }
 
@@ -174,8 +202,13 @@ export class InternAPI {
     });
   }
 
-  private async request<T>(pathname: string, init: RequestInit = {}): Promise<T> {
-    const token = await this.auth.accessToken();
+  private async request<T>(
+    pathname: string,
+    init: RequestInit = {},
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
+    const signal = combinedSignal(init.signal, callerSignal);
+    const token = await this.auth.accessToken(signal);
     const method = init.method ?? "GET";
     const diagnosticFields = {
       method,
@@ -188,7 +221,7 @@ export class InternAPI {
     try {
       response = await this.fetchFn(`${this.config.internBaseURL}${pathname}`, {
         ...init,
-        signal: AbortSignal.timeout(30_000),
+        signal,
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${token}`,
@@ -217,11 +250,7 @@ export class InternAPI {
     if (!response.ok) {
       const message =
         typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
-      throw new Error(
-        response.status === 401
-          ? `AUTH_REQUIRED: ${message}`
-          : `Intern request failed: ${message}`,
-      );
+      throw new InternAPIError(response.status, message, message);
     }
     return body as T;
   }
@@ -233,6 +262,17 @@ export class InternAPI {
       .join(" ");
     this.diagnostics(`[intern-mcp] ${event} ${values}`);
   }
+}
+
+function combinedSignal(
+  requestSignal?: AbortSignal | null,
+  callerSignal?: AbortSignal,
+): AbortSignal {
+  const timeout = AbortSignal.timeout(30_000);
+  const signals = [requestSignal, callerSignal, timeout].filter(
+    (signal): signal is AbortSignal => signal !== undefined && signal !== null,
+  );
+  return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
 }
 
 function diagnosticOrigin(value: string): string {

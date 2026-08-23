@@ -1,74 +1,111 @@
 #!/usr/bin/env node
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { createRequire } from "node:module";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { AuthClient } from "./auth.js";
 import { refreshInstalledDefaultRules } from "./default-rule.js";
 import { InternAPI } from "./api.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type InternConfig } from "./config.js";
 import { buildServer } from "./server.js";
 import { WorkspaceManager } from "./workspace.js";
 import { SSHCredentialManager } from "./ssh.js";
 import {
   parseSetupOptions,
-  readStoredAccessToken,
+  promptAccessToken,
   removeDefaultRuleForHost,
   runSetup,
+  SetupInterruptedError,
 } from "./setup.js";
 
-const config = loadConfig();
-const command = process.argv[2] ?? "serve";
-const verbose =
-  process.argv.includes("--verbose") || process.env.INTERN_MCP_VERBOSE === "1";
-const diagnostics = verbose
-  ? (line: string) => process.stderr.write(`${line}\n`)
-  : undefined;
+interface LaunchDependencies {
+  auth?: Pick<AuthClient, "accessToken">;
+  serve?: (auth: Pick<AuthClient, "accessToken">) => Promise<void>;
+  diagnostics?: (line: string) => void;
+}
 
-switch (command) {
-  case "serve":
-    await serveUntilClosed(new AuthClient(), diagnostics);
-    break;
-  case "launch": {
-    const refreshed = await refreshInstalledDefaultRules(process.env);
-    if (refreshed.length > 0) {
-      diagnostics?.(`Refreshed Intern default rule: ${refreshed.join(", ")}`);
-    }
-    await serveUntilClosed(
-      new AuthClient(await readStoredAccessToken(config)),
-      diagnostics,
-    );
-    break;
+const packageVersion = (
+  createRequire(import.meta.url)("../package.json") as { version: string }
+).version;
+
+export async function launchMcp(
+  config: InternConfig,
+  dependencies: LaunchDependencies = {},
+): Promise<void> {
+  if (dependencies.serve) {
+    const auth = dependencies.auth ?? new AuthClient(config);
+    await auth.accessToken();
+    await dependencies.serve(auth);
+    return;
   }
-  case "status":
-    process.stdout.write(
-      `${JSON.stringify(await new InternAPI(config, new AuthClient(), fetch, diagnostics).session(), null, 2)}\n`,
-    );
-    break;
-  case "setup":
-    try {
-      const options = parseSetupOptions(process.argv.slice(3));
-      if (options.defaultRule === "remove") {
-        process.stdout.write(await removeDefaultRuleForHost(options.host, process.env));
-        break;
+  const auth = new AuthClient(config);
+  await auth.accessToken();
+  await serveUntilClosed(config, auth, dependencies.diagnostics);
+}
+
+async function main(): Promise<void> {
+  const command = process.argv[2] ?? "serve";
+  if (command === "version") {
+    process.stdout.write(`${packageVersion}\n`);
+    return;
+  }
+  const config = loadConfig();
+  const verbose =
+    process.argv.includes("--verbose") || process.env.INTERN_MCP_VERBOSE === "1";
+  const diagnostics = verbose
+    ? (line: string) => process.stderr.write(`${line}\n`)
+    : undefined;
+
+  switch (command) {
+    case "serve":
+      await serveUntilClosed(config, new AuthClient(config), diagnostics);
+      break;
+    case "launch": {
+      const refreshed = await refreshInstalledDefaultRules(process.env);
+      if (refreshed.length > 0) {
+        diagnostics?.(`Refreshed Intern default rule: ${refreshed.join(", ")}`);
       }
-      await runSetup(config, options.host, {
-        verbose: options.verbose,
-        registry: options.registry,
-        defaultRule: options.defaultRule,
-      });
-    } catch (error) {
-      process.stderr.write(
-        `Intern setup failed: ${error instanceof Error ? error.message : "request failed"}\n`,
-      );
-      process.exitCode = 1;
+      await launchMcp(config, { diagnostics });
+      break;
     }
-    break;
-  default:
-    process.stderr.write(
-      "Usage: intern-mcp serve|launch|status|setup --host codex|claude|grok|cursor|opencode|rovodev|pi [--verbose] [--registry URL]\n",
-    );
-    process.exitCode = 2;
+    case "status":
+      process.stdout.write(
+        `${JSON.stringify(await new InternAPI(config, new AuthClient(config), fetch, diagnostics).session(), null, 2)}\n`,
+      );
+      break;
+    case "setup":
+      try {
+        const options = parseSetupOptions(process.argv.slice(3));
+        if (options.defaultRule === "remove") {
+          process.stdout.write(
+            await removeDefaultRuleForHost(options.host, process.env),
+          );
+          break;
+        }
+        const token = options.manualToken ? await promptAccessToken() : undefined;
+        await runSetup(config, options.host, {
+          ...(token !== undefined ? { token } : {}),
+          verbose: options.verbose,
+          registry: options.registry,
+          defaultRule: options.defaultRule,
+        });
+      } catch (error) {
+        process.stderr.write(
+          `Intern setup failed: ${error instanceof Error ? error.message : "request failed"}\n`,
+        );
+        process.exitCode = error instanceof SetupInterruptedError ? error.exitCode : 1;
+      }
+      break;
+    default:
+      process.stderr.write(
+        "Usage: intern-mcp version|serve|launch|status|setup --host codex|claude|grok|cursor|opencode|rovodev|pi [--token] [--verbose] [--registry URL] [--no-default-rule | --remove-default-rule]\n",
+      );
+      process.exitCode = 2;
+  }
 }
 
 async function serveUntilClosed(
+  config: InternConfig,
   auth: AuthClient,
   diagnosticSink?: (line: string) => void,
 ): Promise<void> {
@@ -100,4 +137,15 @@ async function serveUntilClosed(
     process.once("SIGINT", close);
     process.once("SIGTERM", close);
   });
+}
+
+if (isDirectInvocation()) await main();
+
+function isDirectInvocation(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
 }

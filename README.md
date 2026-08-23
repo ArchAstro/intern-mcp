@@ -4,85 +4,52 @@ Local stdio MCP server for working on Intern-hosted sites through guarded Git ch
 
 ## Install in a coding harness
 
-Intern MCP is packaged for distribution as the public
-`@archastro/intern-mcp` npm package.
-It requires Node.js 22 or newer.
-
-### Codex
+Intern MCP is the public `@archastro/intern-mcp` npm package and requires
+Node.js 22 or newer. Run one command, replacing `codex` with your host when
+needed:
 
 ```sh
 npx --yes @archastro/intern-mcp@latest setup --host codex
 ```
 
-Restart Codex after adding the server. Codex stores the stdio command in its
-user configuration and starts the package when a session needs the server.
+Setup opens your browser to sign in to TryIntern and approve the MCP. It also
+prints the approval URL and one-time code, so the same command works on a
+headless machine: open the printed URL in any browser and enter the code. After
+approval, setup verifies the TryIntern session, saves the host registration,
+and prints your organization and role.
 
-### Claude Code
+OAuth credentials live in `~/.config/intern/credentials.json`. The directory
+uses mode `0700`, the file uses mode `0600`, and the record is bound to the
+Platform issuer and OAuth client that issued it. Intern MCP refreshes the
+short-lived access token automatically, including when more than one local
+agent starts at the same time. Users do not normally need to sign in again.
 
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host claude
-```
+### Host commands and next actions
 
-Add `--verbose` to either setup command to print redacted request lifecycle
+- Codex: run the command above with `setup --host codex`. Start a new Codex task,
+  then ask it to run `intern_auth_status`.
+- Claude Code: use `setup --host claude`. Start a new Claude Code session, then
+  ask it to run `intern_auth_status`.
+- Grok: use `setup --host grok`. Start a new Grok session, then ask it to run
+  `intern_auth_status`.
+- Cursor CLI or the Cursor editor: use `setup --host cursor`. Start a new Cursor
+  session, then ask it to run `intern_auth_status`. Both use `~/.cursor/mcp.json`.
+- OpenCode: use `setup --host opencode`. Start a new OpenCode session, then ask
+  it to run `intern_auth_status`.
+- Rovo Dev: use `setup --host rovodev`. Start a new Rovo Dev session, then ask it
+  to run `intern_auth_status`.
+- Pi: use `setup --host pi`, then run `pi install npm:pi-mcp-adapter`. Start a new
+  Pi session, then ask it to run `intern_auth_status`. Pi needs the adapter
+  because its core CLI does not speak MCP.
+
+Add `--verbose` to a setup command to print redacted request lifecycle
 diagnostics on stderr. Verbose output includes the method, query-free endpoint,
-status, duration, and allowlisted response metadata. It never prints the access
-token, request headers, response body, or cookies.
+status, duration, and allowlisted response metadata. It never prints access or
+refresh tokens, request headers, response bodies, cookies, or the device code.
 
-The installer uses Claude Code's user scope, so Intern is available in every
-project. Run `/mcp` inside Claude Code to inspect the connection.
-
-### Grok
-
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host grok
-```
-
-### Cursor CLI
-
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host cursor
-```
-
-Setup writes `~/.cursor/mcp.json`. Cursor CLI (`agent`) and the Cursor editor
-share that file.
-
-### OpenCode
-
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host opencode
-```
-
-### Rovo Dev
-
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host rovodev
-```
-
-### Pi
-
-Pi's core CLI does not speak MCP. Setup writes the shared MCP file at
-`~/.config/mcp/mcp.json`. After setup, install the adapter and restart Pi:
-
-```sh
-npx --yes @archastro/intern-mcp@latest setup --host pi
-pi install npm:pi-mcp-adapter
-```
-
-Create a profile access token at <https://tryintern.dev/connect>, copy it, then
-run the command for your host. The installer validates the token, configures the
-host, verifies the saved registration, and prints the Intern organization and
-role. The terminal renders one `*` for every pasted token character so the paste
-is visible without revealing the secret or adding it to shell history. Intern
-displays it only once. The host stores it through the `intern-mcp launch`
-profile command. The bearer itself lives in `~/.config/intern/access-token`
-with mode `0600`; it is never placed in child process arguments or host
-configuration.
-
-These harnesses launch the same local stdio executable. Intern MCP does not
-run an OAuth flow or accept a token through a tool call. To rotate access, run
-setup with a new token, restart the host, and revoke the old token on the
-Connect page. Revocation blocks new API calls and SSH certificates immediately;
-a Git certificate already issued can remain valid until its five-minute expiry.
+The TryIntern Connect page remains on the manual-token flow until the new npm
+release passes the public-package release gate. This README documents the
+prepared package behavior; it does not claim that frontend switch is deployed.
 
 The setup command resolves npm's stable `latest` release and saves a launcher
 that checks that channel whenever the MCP host starts. The saved launcher uses
@@ -93,19 +60,6 @@ package spec such as `@archastro/intern-mcp@0.1.1`, or to a package tarball.
 
 The repository is private; the package is public on npm.
 
-If a developer machine maps the `@archastro` scope to another registry, override
-that local mapping for this public package:
-
-```sh
-npx --yes --@archastro:registry=https://registry.npmjs.org \
-  @archastro/intern-mcp@latest setup --host codex \
-  --registry https://registry.npmjs.org
-```
-
-The first registry option lets npx find the setup executable. The setup
-`--registry` option saves the same scoped override in the host launcher so
-later restarts continue resolving the public package.
-
 Maintainers run the manual **release** workflow from `main` and choose a patch,
 minor, or major bump. It verifies the package, commits the version change on a
 release branch, rebase-merges the version-only PR, tags that exact merged commit
@@ -115,13 +69,43 @@ creates the GitHub Release. npm must configure `ArchAstro/intern-mcp`,
 `publish.yml`, and environment `npm-release` as the trusted publisher; no
 `NPM_TOKEN` is used.
 
+## Manual and CI authentication
+
+Browser approval is the normal setup path. For CI or a deliberately manual
+configuration, create a profile-scoped token on the TryIntern Connect page and
+either export it as `INTERN_ACCESS_TOKEN` for `intern-mcp serve`, or opt into
+the setup prompt:
+
+```sh
+npx --yes @archastro/intern-mcp@latest setup --host codex --token
+```
+
+The prompt keeps the token out of shell history and saves the legacy
+`~/.config/intern/access-token` file with mode `0600`. Environment credentials
+take precedence over stored OAuth credentials. Manual tokens are not placed in
+host arguments or host configuration.
+
+Revocation blocks new API calls and SSH certificates immediately; an SSH
+certificate already issued can remain valid until its five-minute expiry.
+
+## Troubleshooting npm registry settings
+
+If your user npm configuration maps the `@archastro` scope to a private
+registry, override that setting for this public package. The first override lets
+npx find setup on public npm; `--registry` saves the same exception in the MCP
+launcher:
+
+```sh
+npx --yes --@archastro:registry=https://registry.npmjs.org \
+  @archastro/intern-mcp@latest setup --host codex \
+  --registry https://registry.npmjs.org
+```
+
 ## Configure the server
 
-The production TryIntern origin is built in. `INTERN_ACCESS_TOKEN` is required
-for authenticated API calls and should be a profile-scoped token created on the
-Connect page. `intern-mcp serve` reads it directly from the environment for
-manual and CI configurations. `intern-mcp launch` reads the mode-0600 profile
-written by setup, then supplies the same token contract internally.
+The production TryIntern and Platform origins and public OAuth client are built
+in. `intern-mcp launch` uses the browser-approved profile written by setup.
+`intern-mcp serve` accepts `INTERN_ACCESS_TOKEN` for manual and CI use.
 
 These optional environment values override the defaults for local testing or custom workspace setup:
 

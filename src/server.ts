@@ -1,7 +1,12 @@
 import { completable, McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import type { AuthClient } from "./auth.js";
-import type { InternAPI } from "./api.js";
+import {
+  InternAPIError,
+  type InternAPI,
+  type InternSession,
+  type InternSite,
+} from "./api.js";
 import { PACKAGE_VERSION } from "./config.js";
 import type { WorkspaceManager } from "./workspace.js";
 
@@ -46,7 +51,7 @@ const sessionSchema = z.object({
       .nullable()
       .optional(),
   }),
-  org: z.object({ id: z.string(), slug: z.string(), state: z.string() }),
+  org: z.object({ id: z.string().nullable(), slug: z.string(), state: z.string() }),
 });
 const siteSchema = z.object({
   id: z.string(),
@@ -86,6 +91,20 @@ const validationSchema = z.object({
   }),
   issues: z.array(validationIssueSchema),
 });
+const prepareResultSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ready"),
+    site: siteSchema,
+    workspace: workspaceSchema,
+    validation: validationSchema,
+  }),
+  z.object({
+    status: z.literal("provisioning"),
+    orgState: z.string(),
+    retryAfterMs: z.number(),
+    message: z.string(),
+  }),
+]);
 const localTestBaseSchema = z.object({
   testedHead: z.string(),
   source: z.literal("working-tree"),
@@ -170,11 +189,7 @@ export function buildServer(
           .default("vite")
           .describe("Runtime site type used only when creating a missing site"),
       }),
-      outputSchema: z.object({
-        site: siteSchema,
-        workspace: workspaceSchema,
-        validation: validationSchema,
-      }),
+      outputSchema: prepareResultSchema,
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -183,18 +198,13 @@ export function buildServer(
       },
     },
     async ({ site: slug, createIfMissing, siteType }) => {
-      const session = await api.session();
-      const sites = await api.listSites();
-      let site = sites.find((candidate) => candidate.slug === slug);
-      if (!site && createIfMissing) site = await api.createSite(slug, siteType);
-      if (!site)
-        throw new Error(
-          `Intern site not found: ${slug}; set createIfMissing only if it should be created`,
-        );
-      const contract = await api.runtimeContract();
-      const workspace = await workspaces.prepare(session.org.slug, site, contract);
-      const validation = await workspaces.validate(session.org.slug, site, contract);
-      return result({ site, workspace, validation });
+      return result(
+        await prepareInternSite(api, workspaces, {
+          site: slug,
+          createIfMissing,
+          siteType,
+        }),
+      );
     },
   );
 
@@ -415,6 +425,157 @@ export function buildServer(
   );
 
   return server;
+}
+
+export interface ReadinessRuntime {
+  now(): number;
+  sleep(milliseconds: number, signal: AbortSignal): Promise<void>;
+}
+
+const productionReadinessRuntime: ReadinessRuntime = {
+  now: Date.now,
+  sleep: (milliseconds, signal) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const timer = setTimeout(resolve, milliseconds);
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason);
+        },
+        { once: true },
+      );
+    }),
+};
+
+const organizationReadinessTimeoutMs = 20_000;
+const organizationReadinessPollMs = 1_000;
+const organizationRetryAfterMs = 5_000;
+
+export async function prepareInternSite(
+  api: InternAPI,
+  workspaces: WorkspaceManager,
+  input: { site: string; createIfMissing: boolean; siteType: string },
+  runtime: ReadinessRuntime = productionReadinessRuntime,
+) {
+  const controller = new AbortController();
+  const deadlineAt = runtime.now() + organizationReadinessTimeoutMs;
+  const deadlineReason = new Error("organization readiness timed out");
+  const deadlineTimer = setTimeout(
+    () => controller.abort(deadlineReason),
+    organizationReadinessTimeoutMs,
+  );
+  deadlineTimer.unref?.();
+  const stopReadiness = () => {
+    clearTimeout(deadlineTimer);
+    if (!controller.signal.aborted) controller.abort();
+  };
+  let session: InternSession;
+  let site: InternSite | undefined;
+  let orgState = "unprovisioned";
+  let authoritativeReadinessObserved = false;
+  try {
+    session = await api.session(controller.signal);
+    orgState = session.org.state;
+    authoritativeReadinessObserved = organizationProvisioningIsAuthoritative(orgState);
+    const sites = await api.listSites(controller.signal);
+    site = sites.find((candidate) => candidate.slug === input.site);
+
+    if (session.org.state === "active") {
+      stopReadiness();
+    } else if (!input.createIfMissing) {
+      stopReadiness();
+      throw new Error(
+        `Intern site not found: ${input.site}; set createIfMissing only if it should be created`,
+      );
+    } else {
+      if (shouldTriggerProvisioning(session.org.state, site)) {
+        try {
+          site = await api.createSite(input.site, input.siteType, controller.signal);
+        } catch (error) {
+          if (!(error instanceof InternAPIError) || error.code !== "org_not_ready") {
+            throw error;
+          }
+          orgState = "provisioning";
+          authoritativeReadinessObserved = true;
+        }
+      }
+      while (session.org.state !== "active") {
+        const remaining = deadlineAt - runtime.now();
+        if (remaining <= 0) {
+          stopReadiness();
+          if (authoritativeReadinessObserved) return provisioningResult(orgState);
+          throw deadlineReason;
+        }
+        await runtime.sleep(
+          Math.min(organizationReadinessPollMs, remaining),
+          controller.signal,
+        );
+        if (runtime.now() >= deadlineAt) {
+          stopReadiness();
+          if (authoritativeReadinessObserved) return provisioningResult(orgState);
+          throw deadlineReason;
+        }
+        session = await api.session(controller.signal);
+        if (
+          session.org.state !== "active" &&
+          !(orgState === "provisioning" && session.org.state === "unprovisioned")
+        ) {
+          orgState = session.org.state;
+        }
+        authoritativeReadinessObserved ||= organizationProvisioningIsAuthoritative(
+          session.org.state,
+        );
+      }
+      const sitesAfterProvisioning = await api.listSites(controller.signal);
+      site = sitesAfterProvisioning.find((candidate) => candidate.slug === input.site);
+      stopReadiness();
+    }
+  } catch (error) {
+    clearTimeout(deadlineTimer);
+    if (error === deadlineReason && authoritativeReadinessObserved) {
+      return provisioningResult(orgState);
+    }
+    throw error;
+  }
+
+  if (!site && input.createIfMissing) {
+    site = await api.createSite(input.site, input.siteType);
+  }
+  if (!site)
+    throw new Error(
+      `Intern site not found: ${input.site}; set createIfMissing only if it should be created`,
+    );
+  const contract = await api.runtimeContract();
+  const workspace = await workspaces.prepare(session.org.slug, site, contract);
+  const validation = await workspaces.validate(session.org.slug, site, contract);
+  return { status: "ready" as const, site, workspace, validation };
+}
+
+function shouldTriggerProvisioning(
+  state: string,
+  existingSite: InternSite | undefined,
+): boolean {
+  if (state === "failed" || state === "destroyed") return true;
+  return state === "unprovisioned" && existingSite === undefined;
+}
+
+function organizationProvisioningIsAuthoritative(state: string): boolean {
+  return state === "provisioning";
+}
+
+function provisioningResult(orgState: string) {
+  return {
+    status: "provisioning" as const,
+    orgState,
+    retryAfterMs: organizationRetryAfterMs,
+    message:
+      "Intern is still preparing your organization. Retry intern_prepare_site shortly.",
+  };
 }
 
 async function completeSiteSlugs(api: InternAPI, value: string): Promise<string[]> {
