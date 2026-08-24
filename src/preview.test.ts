@@ -1,4 +1,5 @@
 import http from "node:http";
+import vm from "node:vm";
 import { afterEach, expect, test } from "vitest";
 import { defaultLocalUser, startLocalPreviewHost } from "./preview.js";
 import type { RunningSiteRuntime } from "./validation.js";
@@ -75,6 +76,36 @@ test("local preview injects the host resolver and isolates its in-memory ME stor
   ).text();
   expect(runtimeScript).toContain("resolveRuntime");
   expect(runtimeScript).toContain("protocolVersion:1");
+  expect(runtimeScript).toContain("transport:Object.freeze({version:1,invoke})");
+  const runtimeGlobal: Record<string, unknown> = {};
+  vm.runInNewContext(runtimeScript, {
+    globalThis: runtimeGlobal,
+    Uint8Array,
+    btoa,
+    fetch: (input: string, init?: RequestInit) =>
+      fetch(new URL(input, preview.url), init),
+  });
+  const runtime = (
+    runtimeGlobal.intern as {
+      resolveRuntime(): {
+        transport: {
+          invoke(binding: string, operation: string, input?: unknown): Promise<unknown>;
+        };
+      };
+    }
+  ).resolveRuntime();
+  await expect(runtime.transport.invoke("me", "get")).resolves.toMatchObject({
+    name: "Local Intern User",
+  });
+  await expect(
+    runtime.transport.invoke("me", "update", { name: "Transport Ada" }),
+  ).resolves.toMatchObject({ name: "Transport Ada" });
+  await expect(runtime.transport.invoke("gmail", "get")).rejects.toMatchObject({
+    code: "plugin_unavailable",
+  });
+  await expect(runtime.transport.invoke("me", "missing")).rejects.toMatchObject({
+    code: "plugin_contract_error",
+  });
   const updated = await fetch(new URL("/.intern/api/me", preview.url), {
     method: "PATCH",
     headers: { "content-type": "application/json" },
