@@ -860,6 +860,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     await fetch(new URL("/.intern/runtime.js", localTestResult.test.url))
   ).text();
   expect(runtimeScript).toContain("resolveRuntime");
+  expect(runtimeScript).toContain("transport:Object.freeze({version:1,invoke})");
   expect(runtimeScript).toContain("plugins:Object.freeze({me})");
   const initialMe = await (
     await fetch(new URL("/.intern/api/me", localTestResult.test.url))
