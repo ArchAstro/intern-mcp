@@ -1349,10 +1349,12 @@ setInterval(() => {}, 60000);
     expect(input.isPaused()).toBe(true);
   });
 
-  it("lets a human paste a wrapping Intern token into setup --token and exit without closing stdin", async () => {
+  it("lets setup --token exit after a pasted token without closing stdin", async () => {
     // Setup: packaged CLI, isolated HOME, and a TryIntern session endpoint
     // that accepts the pasted profile token. Stdin stays open after Enter,
     // matching a real terminal that does not send EOF when the user pastes.
+    // Wrap redraw is covered by the TTY unit tests above; this child uses a
+    // pipe, so it proves the pause/unref hang fix, not CSI painting.
     await buildExecutable();
     const server = createServer((request, response) => {
       if (request.url === "/api/v1/mcp/session") {
