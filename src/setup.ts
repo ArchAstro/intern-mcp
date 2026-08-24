@@ -310,24 +310,33 @@ export async function promptAccessToken(
   output: NodeJS.WritableStream = process.stderr,
 ): Promise<string> {
   const prompt = "Paste Intern access token: ";
-  output.write(prompt);
+  const escape = String.fromCharCode(27);
   const terminal = Boolean((input as { isTTY?: boolean }).isTTY);
-  const raw =
-    terminal &&
-    "setRawMode" in input &&
-    typeof (input as NodeJS.ReadStream).setRawMode === "function";
-  if (raw) (input as NodeJS.ReadStream).setRawMode(true);
+  const readable = input as NodeJS.ReadStream;
+  const raw = terminal && typeof readable.setRawMode === "function";
+  if (raw) readable.setRawMode(true);
   input.resume();
 
   return new Promise((resolve, reject) => {
     let buffer = "";
     let settled = false;
+    let paintedRows = 0;
 
     const paint = () => {
       if (!terminal) return;
-      output.write(
-        `\r${String.fromCharCode(27)}[2K${prompt}${"*".repeat(Array.from(buffer).length)}`,
-      );
+      const line = `${prompt}${"*".repeat(Array.from(buffer).length)}`;
+      const columns = terminalColumns(output);
+      // CR+EL only clears the current wrapped row, so a pasted token longer
+      // than the terminal reprints the prompt on every remaining character.
+      // Move back to the first painted row and erase to the end of the screen.
+      if (paintedRows > 0) {
+        if (paintedRows > 1) output.write(`${escape}[${paintedRows - 1}A`);
+        output.write(`\r${escape}[J`);
+      }
+      output.write(line);
+      // xenl: writing an exact multiple of the width leaves the cursor on the
+      // last cell of the last filled row; the wrap happens on the next character.
+      paintedRows = Math.max(1, Math.ceil(line.length / columns));
     };
 
     const finish = (action: () => void) => {
@@ -336,8 +345,15 @@ export async function promptAccessToken(
       input.removeListener("data", onData);
       input.removeListener("end", onEnd);
       input.removeListener("error", onError);
-      if (raw) (input as NodeJS.ReadStream).setRawMode(false);
-      action();
+      try {
+        if (raw) readable.setRawMode(false);
+      } finally {
+        // resume() keeps a TTY/pipe referenced; without pause the process
+        // stays alive after a successful paste until the user sends Ctrl-C.
+        input.pause();
+        if (typeof readable.unref === "function") readable.unref();
+        action();
+      }
     };
 
     const onEnd = () => {
@@ -353,6 +369,7 @@ export async function promptAccessToken(
 
     const onData = (chunk: Buffer | string) => {
       const text = stripPasteBrackets(chunk.toString("utf8"));
+      let dirty = false;
       for (const char of text) {
         if (char === "\u0003") {
           finish(() => reject(new Error("Token entry cancelled")));
@@ -368,26 +385,35 @@ export async function promptAccessToken(
         }
         if (char === "\u007f" || char === "\b") {
           buffer = Array.from(buffer).slice(0, -1).join("");
-          paint();
+          dirty = true;
           continue;
         }
         if (char === "\u0015") {
           buffer = "";
-          paint();
+          dirty = true;
           continue;
         }
         if (char >= " " || char === "\t") {
           buffer += char;
-          paint();
+          dirty = true;
         }
       }
-      paint();
+      if (dirty) paint();
     };
 
+    if (terminal) paint();
+    else output.write(prompt);
     input.on("data", onData);
     input.once("end", onEnd);
     input.once("error", onError);
   });
+}
+
+function terminalColumns(output: NodeJS.WritableStream): number {
+  const columns = (output as { columns?: unknown }).columns;
+  return typeof columns === "number" && Number.isInteger(columns) && columns > 0
+    ? columns
+    : 80;
 }
 
 function stripPasteBrackets(value: string): string {

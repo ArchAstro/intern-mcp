@@ -1290,7 +1290,232 @@ setInterval(() => {}, 60000);
 
     await expect(pending).rejects.toThrow("Token entry cancelled");
   });
+
+  it("shows one masked prompt after a pasted token that wraps the terminal", async () => {
+    const columns = 40;
+    const { input, output, visible } = maskedTerminal(columns);
+    const token = `secret-paste-token-${"x".repeat(180)}`;
+    const pending = promptAccessToken(input, output);
+    input.write(`${token}\n`);
+
+    await expect(pending).resolves.toBe(token);
+    const screen = replayTerminal(visible(), columns);
+    expect(screen.split("Paste Intern access token:").length - 1).toBe(1);
+    expect((screen.match(/\*/g) ?? []).length).toBe(token.length);
+    expect(screen).not.toContain(token);
+    expect(screen).not.toContain("secret-paste-token");
+    expect(input.isPaused()).toBe(true);
+  });
+
+  it("redraws a wrapping typed token over the same prompt instead of reprinting it", async () => {
+    const columns = 40;
+    const { input, output, visible } = maskedTerminal(columns);
+    const token = "typed-wrap-token-xxxxxxxxxxxxxxxxxxxx";
+    const pending = promptAccessToken(input, output);
+    for (const char of token) input.write(char);
+    input.write("\n");
+
+    await expect(pending).resolves.toBe(token);
+    const screen = replayTerminal(visible(), columns);
+    expect(screen.split("Paste Intern access token:").length - 1).toBe(1);
+    expect((screen.match(/\*/g) ?? []).length).toBe(token.length);
+    expect(screen).not.toContain("typed-wrap-token");
+  });
+
+  it("keeps the prompt on the first row when the mask fills exact terminal widths", async () => {
+    const columns = 40;
+    const prompt = "Paste Intern access token: ";
+    const { input, output, visible } = maskedTerminal(columns);
+    // 27 + 53 = 80, two exact terminal rows; more characters then force a CUU redraw.
+    const token = `${"a".repeat(53)}${"b".repeat(20)}`;
+    const pending = promptAccessToken(input, output);
+    for (const char of token) input.write(char);
+    input.write("\n");
+
+    await expect(pending).resolves.toBe(token);
+    const screen = replayTerminal(visible(), columns);
+    expect(screen.split(prompt).length - 1).toBe(1);
+    expect(screen.startsWith(prompt)).toBe(true);
+    expect((screen.match(/\*/g) ?? []).length).toBe(token.length);
+    expect(screen).not.toContain("a".repeat(53));
+  });
+
+  it("restores cooked mode and pauses stdin after a successful paste", async () => {
+    const { input, output, rawModes } = maskedTerminal(80);
+    const pending = promptAccessToken(input, output);
+    input.write("secret-token\n");
+    await expect(pending).resolves.toBe("secret-token");
+    expect(rawModes).toEqual([true, false]);
+    expect(input.isPaused()).toBe(true);
+  });
+
+  it("lets a human paste a wrapping Intern token into setup --token and exit without closing stdin", async () => {
+    // Setup: packaged CLI, isolated HOME, and a TryIntern session endpoint
+    // that accepts the pasted profile token. Stdin stays open after Enter,
+    // matching a real terminal that does not send EOF when the user pastes.
+    await buildExecutable();
+    const server = createServer((request, response) => {
+      if (request.url === "/api/v1/mcp/session") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(session));
+        return;
+      }
+      response.writeHead(404).end();
+    });
+    const baseURL = await listenTestServer(server);
+    const token = `secret-paste-token-${"x".repeat(200)}`;
+    const child = spawn(
+      process.execPath,
+      [
+        path.join(process.cwd(), "dist", "index.js"),
+        "setup",
+        "--host",
+        "cursor",
+        "--token",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOME: root,
+          INTERN_CONFIG_ROOT: config.configRoot,
+          INTERN_WORKSPACE_ROOT: path.join(root, "sites"),
+          INTERN_BASE_URL: baseURL,
+          ARCHASTRO_API_URL: baseURL,
+          ARCHASTRO_PUBLISHABLE_KEY: "pk_token_paste",
+          INTERN_OAUTH_CLIENT_ID: "cc_token_paste",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    // Action: paste a token longer than a typical terminal row and press Enter.
+    child.stdin.write(`${token}\n`);
+    try {
+      const result = await childExitWithin(child, 5_000);
+      const out = Buffer.concat(stdout).toString("utf8");
+      const err = Buffer.concat(stderr).toString("utf8");
+      // Outcome: setup finishes, the secret never appears, and the process
+      // exits without Ctrl-C even though the stdin pipe is still open.
+      expect(result, err).toEqual({ code: 0, signal: null });
+      expect(out).toContain("Intern connected to Cursor CLI as Acme · admin");
+      expect(out).toContain("intern_auth_status");
+      expect(out).not.toContain(token);
+      expect(err).not.toContain(token);
+      expect(err).toContain("Paste Intern access token");
+      await expect(readStoredAccessToken(config)).resolves.toBe(token);
+    } finally {
+      child.kill("SIGKILL");
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
 });
+
+function maskedTerminal(columns: number): {
+  input: PassThrough & {
+    isTTY: boolean;
+    setRawMode: (mode: boolean) => void;
+  };
+  output: PassThrough & { isTTY: boolean; columns: number };
+  rawModes: boolean[];
+  visible: () => string;
+} {
+  const input = new PassThrough() as PassThrough & {
+    isTTY: boolean;
+    setRawMode: (mode: boolean) => void;
+  };
+  const output = new PassThrough() as PassThrough & {
+    isTTY: boolean;
+    columns: number;
+  };
+  input.isTTY = true;
+  output.isTTY = true;
+  output.columns = columns;
+  const rawModes: boolean[] = [];
+  input.setRawMode = (mode: boolean) => {
+    rawModes.push(mode);
+  };
+  let visible = "";
+  output.on("data", (chunk) => {
+    visible += chunk.toString();
+  });
+  return {
+    input,
+    output,
+    rawModes,
+    visible: () => visible,
+  };
+}
+
+function replayTerminal(bytes: string, columns: number): string {
+  const escape = String.fromCharCode(27);
+  const lines = [""];
+  let row = 0;
+  let col = 0;
+
+  const ensureRow = () => {
+    while (lines.length <= row) lines.push("");
+  };
+
+  const put = (ch: string) => {
+    // xenl: filling the last column does not wrap until the next character.
+    if (col >= columns) {
+      col = 0;
+      row += 1;
+    }
+    ensureRow();
+    const current = lines[row] ?? "";
+    const padded =
+      current.length >= col ? current : current + " ".repeat(col - current.length);
+    lines[row] = `${padded.slice(0, col)}${ch}${padded.slice(col + 1)}`;
+    col += 1;
+  };
+
+  let index = 0;
+  while (index < bytes.length) {
+    if (bytes.startsWith(`${escape}[`, index)) {
+      const match = bytes.slice(index + 2).match(/^([0-9;]*)([A-Za-z])/);
+      if (!match) {
+        index += 1;
+        continue;
+      }
+      const first = match[1] === "" ? 0 : Number(match[1].split(";")[0] ?? 0);
+      index += 2 + match[0].length;
+      if (match[2] === "A") {
+        row = Math.max(0, row - (first || 1));
+        continue;
+      }
+      if (match[2] === "J") {
+        ensureRow();
+        lines[row] = (lines[row] ?? "").slice(0, col);
+        lines.length = row + 1;
+        continue;
+      }
+      if (match[2] === "K") {
+        ensureRow();
+        lines[row] = first === 2 ? "" : (lines[row] ?? "").slice(0, col);
+      }
+      continue;
+    }
+    const ch = bytes[index]!;
+    index += 1;
+    if (ch === "\r") {
+      col = 0;
+      continue;
+    }
+    if (ch === "\n") {
+      row += 1;
+      col = 0;
+      ensureRow();
+      continue;
+    }
+    put(ch);
+  }
+  return lines.join("\n");
+}
 
 async function runProcess(
   command: string,
