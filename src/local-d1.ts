@@ -1,4 +1,7 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+
+const require = createRequire(import.meta.url);
 
 type D1Value = null | number | string | { readonly $archastroBlob: Uint8Array };
 
@@ -14,7 +17,16 @@ interface QueryRequest extends StatementRequest {
 }
 
 export class LocalD1 {
-  readonly #database = new DatabaseSync(":memory:");
+  readonly #database: DatabaseSync;
+
+  constructor() {
+    // Loading node:sqlite emits an experimental warning on Node 24. Keep that
+    // feature-specific module out of commands such as `version` that never use D1.
+    const { DatabaseSync } = require("node:sqlite") as {
+      DatabaseSync: new (location: string) => DatabaseSync;
+    };
+    this.#database = new DatabaseSync(":memory:");
+  }
 
   async query(input: unknown): Promise<unknown> {
     const request = validateQuery(input);
