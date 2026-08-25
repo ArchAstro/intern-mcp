@@ -54,6 +54,7 @@ export interface InternSite {
   port: number;
   url: string;
   gitUrl: string;
+  plugins?: SitePluginInstallation[];
 }
 
 export interface SiteRuntimeContract {
@@ -100,6 +101,14 @@ export class SitePluginsClient {
       sitePluginPath(siteSlug, plugin),
     );
     return response.installation;
+  }
+
+  async list(siteSlug: string): Promise<SitePluginInstallation[]> {
+    return (
+      (await this.request<{ sites?: InternSite[] }>("/api/v1/mcp/sites")).sites?.find(
+        (site) => site.slug === siteSlug,
+      )?.plugins ?? []
+    );
   }
 
   async put(

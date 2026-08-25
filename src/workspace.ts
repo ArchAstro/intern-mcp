@@ -289,6 +289,7 @@ export class WorkspaceManager {
               snapshot,
               contract,
               session ? localUserFromSession(session) : defaultLocalUser(),
+              site.plugins,
             );
             if (this.closing) {
               await runtime.stop();
