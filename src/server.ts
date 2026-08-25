@@ -20,14 +20,17 @@ function siteSlugSchema() {
 }
 
 const siteSlug = siteSlugSchema();
+const pluginKey = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/);
+const pluginBinding = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/);
 
 const SERVER_INSTRUCTIONS = [
   "Work on Intern-hosted sites in guarded local Git checkouts. Intern never stages or commits files.",
   "Authentication comes from the mode-0600 profile used by intern-mcp launch, or from INTERN_ACCESS_TOKEN in a manual stdio configuration. If it is missing, ask the user to create a profile token at https://tryintern.dev/connect and run the setup command shown there. Never ask the user to paste a token into chat or a tool call.",
   "1. intern_auth_status — confirm the configured token resolves to the expected user and organization.",
   "2. intern_prepare_site — idempotently install the site's me plugin, clone or reuse the checkout, and edit files at the returned absolute path with the host's filesystem tools.",
+  "Plugins are opt-in site capabilities. Use intern_enable_site_plugin and intern_remove_site_plugin; use plugin and binding d1 before writing client.d1 code.",
   "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. It skips deleted tracked files, upgrades Intern-owned runtime files, installs devDependencies locally, runs the site build script when present, and writes dist/ into the checkout. Call it again after further edits. intern_stop_test stops it.",
-  "For current-user features, add @archastro/intern-sdk as a devDependency, default-import Client, construct new Client(), and use client.me. Never write globalThis.intern, a memory adapter, a gateway adapter, or other runtime selection into the checkout. intern_test_site injects the local runtime outside the snapshot; the production host supplies its implementation to the same committed bundle.",
+  "For current-user or database features, add @archastro/intern-sdk as a devDependency, default-import Client, construct new Client(), and use client.me or client.d1. Never write globalThis.intern, a memory adapter, a gateway adapter, or other runtime selection into the checkout. intern_test_site injects the local runtime outside the snapshot; the production host supplies its implementation to the same committed bundle.",
   "4. Commit with the host's git, including dist/ when intern_test_site wrote it, then intern_validate_site against Intern's runtime contract.",
   "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation. The tenant does not install packages or build.",
   "Use intern_list_sites and intern_site_status to inspect. Setup users rotate access by rerunning setup and restarting the host; manual users update INTERN_ACCESS_TOKEN and restart it.",
@@ -53,6 +56,14 @@ const sessionSchema = z.object({
   }),
   org: z.object({ id: z.string().nullable(), slug: z.string(), state: z.string() }),
 });
+const sitePluginSchema = z.object({
+  binding: z.string(),
+  plugin: z.string(),
+  protocolVersion: z.number(),
+  config: z.unknown(),
+  state: z.string(),
+  errorCode: z.string().nullable(),
+});
 const siteSchema = z.object({
   id: z.string(),
   orgSlug: z.string(),
@@ -62,6 +73,7 @@ const siteSchema = z.object({
   port: z.number(),
   url: z.string(),
   gitUrl: z.string(),
+  plugins: z.array(sitePluginSchema).optional(),
 });
 const workspaceSchema = z.object({
   path: z.string(),
@@ -170,6 +182,79 @@ export function buildServer(
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async () => result({ sites: await api.listSites() }),
+  );
+
+  server.registerTool(
+    "intern_list_site_plugins",
+    {
+      title: "List site plugins",
+      description: "List the public plugin installations enabled for one Intern site.",
+      inputSchema: z.object({ site: siteSlug }),
+      outputSchema: z.object({ site: siteSchema, plugins: z.array(sitePluginSchema) }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ site: slug }) => {
+      const { site } = await resolveSite(api, slug);
+      return result({ site, plugins: site.plugins ?? [] });
+    },
+  );
+
+  server.registerTool(
+    "intern_enable_site_plugin",
+    {
+      title: "Enable site plugin",
+      description:
+        "Idempotently enable a catalog plugin for one site. D1 uses plugin d1, binding d1, and optional jurisdiction or location_hint config.",
+      inputSchema: z.object({
+        site: siteSlug,
+        binding: pluginBinding,
+        plugin: pluginKey,
+        config: z.record(z.string(), z.unknown()).default({}),
+      }),
+      outputSchema: z.object({ site: siteSchema, installation: sitePluginSchema }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ site: slug, binding, plugin, config }) => {
+      const { site } = await resolveSite(api, slug);
+      const installation = await api.sitePlugins.put(
+        site.slug,
+        binding,
+        plugin,
+        config,
+      );
+      return result({ site, installation });
+    },
+  );
+
+  server.registerTool(
+    "intern_remove_site_plugin",
+    {
+      title: "Remove site plugin",
+      description:
+        "Disable and deprovision one site plugin binding. Provider cleanup completes before the installation disappears.",
+      inputSchema: z.object({ site: siteSlug, binding: pluginBinding }),
+      outputSchema: z.object({
+        site: siteSchema,
+        binding: z.string(),
+        removed: z.literal(true),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ site: slug, binding }) => {
+      const { site } = await resolveSite(api, slug);
+      await api.sitePlugins.delete(site.slug, binding);
+      return result({ site, binding, removed: true as const });
+    },
   );
 
   server.registerTool(

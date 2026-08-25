@@ -20,6 +20,8 @@ const sdkRoot = resolve(
     process.env.INTERN_SDK_REPOSITORY ??
     "node_modules/@archastro/intern-sdk",
 );
+const testD1 =
+  process.argv[2] !== undefined || process.env.INTERN_SDK_REPOSITORY !== undefined;
 const sdkEntry = join(sdkRoot, "dist", "index.js");
 const previewEntry = join(mcpRoot, "dist", "preview.js");
 await Promise.all([access(sdkEntry), access(previewEntry)]).catch(() => {
@@ -35,7 +37,7 @@ const source = join(fixture, "src");
 await mkdir(source);
 await writeFile(
   join(fixture, "index.html"),
-  '<!doctype html><html><head><meta charset="UTF-8"><title>SDK compatibility</title></head><body><h1 id="name"></h1><img id="picture"><div id="role"></div><script type="module" src="/src/main.js"></script></body></html>',
+  '<!doctype html><html><head><meta charset="UTF-8"><title>SDK compatibility</title></head><body><h1 id="name"></h1><img id="picture"><div id="role"></div><div id="database"></div><script type="module" src="/src/main.js"></script></body></html>',
 );
 await writeFile(
   join(source, "main.js"),
@@ -50,9 +52,17 @@ const updated = await client.me.update({
     filename: "avatar.png",
   },
 });
+${
+  testD1
+    ? `await client.d1.exec("CREATE TABLE proof (id INTEGER PRIMARY KEY, value TEXT)");
+await client.d1.prepare("INSERT INTO proof (value) VALUES (?)").bind("persisted").run();
+const databaseValue = await client.d1.prepare("SELECT value FROM proof WHERE id = ?").bind(1).first("value");`
+    : `const databaseValue = "not-tested";`
+}
 document.querySelector("#name").textContent = updated.name;
 document.querySelector("#picture").src = updated.profilePicture.url;
 document.querySelector("#role").textContent = initial.viewer.orgRole ?? "local";
+document.querySelector("#database").textContent = databaseValue;
 document.body.dataset.ready = "true";
 `,
 );
@@ -101,6 +111,24 @@ try {
       },
     },
     defaultLocalUser(),
+    [
+      {
+        binding: "me",
+        plugin: "me",
+        protocolVersion: 1,
+        config: {},
+        state: "active",
+        errorCode: null,
+      },
+      {
+        binding: "d1",
+        plugin: "d1",
+        protocolVersion: 1,
+        config: {},
+        state: "active",
+        errorCode: null,
+      },
+    ],
   );
   const previewURL = preview.url;
   browser = await chromium.launch({ channel: "chrome", headless: true });
@@ -115,6 +143,9 @@ try {
     "data:image/png;base64,AP8="
   ) {
     throw new Error("profile picture bytes did not survive the MCP preview boundary");
+  }
+  if (testD1 && (await page.locator("#database").textContent()) !== "persisted") {
+    throw new Error("client.d1 query did not cross the MCP preview boundary");
   }
   if (
     (await page.evaluate(() => typeof globalThis.intern?.resolveRuntime)) !== "function"

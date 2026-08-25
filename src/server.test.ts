@@ -107,6 +107,7 @@ test("returns ready after an organization becomes active", async () => {
         new InternAPIError(409, "org_not_ready", "organization is provisioning"),
       )
       .mockResolvedValueOnce(preparedSite),
+    sitePlugins: { put: vi.fn() },
     runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
   };
   const workspaces = {
@@ -139,6 +140,7 @@ test.each([
       createSite: vi.fn(async () => {
         throw new InternAPIError(409, "org_not_ready", "organization is provisioning");
       }),
+      sitePlugins: { put: vi.fn() },
       runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
     };
     const workspaces = {
@@ -259,6 +261,7 @@ test("does not retrigger an organization that is already provisioning", async ()
     session: vi.fn(async () => clock.nextSession()),
     listSites: vi.fn(async () => []),
     createSite: vi.fn(async () => preparedSite),
+    sitePlugins: { put: vi.fn() },
     runtimeContract: vi.fn(async () => ({ version: "intern-node-static-v1" })),
   };
 
@@ -516,6 +519,9 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
       expect.arrayContaining([
         "intern_auth_status",
         "intern_list_sites",
+        "intern_list_site_plugins",
+        "intern_enable_site_plugin",
+        "intern_remove_site_plugin",
         "intern_prepare_site",
         "intern_site_status",
         "intern_validate_site",
@@ -666,6 +672,14 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   };
   let backendRequestCount = 0;
   let meInstallationPuts = 0;
+  const installations: Array<{
+    binding: string;
+    plugin: string;
+    protocolVersion: number;
+    config: Record<string, unknown>;
+    state: string;
+    errorCode: null;
+  }> = [];
   let blockedSiteList: { started(): void; wait: Promise<void> } | undefined;
   const backend = http.createServer(async (request, response) => {
     backendRequestCount += 1;
@@ -697,20 +711,31 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
         }),
       );
     else if (
-      request.url === "/api/v1/mcp/sites/docs/plugins/me" &&
+      request.url?.startsWith("/api/v1/mcp/sites/docs/plugins/") &&
       request.method === "PUT"
     ) {
-      meInstallationPuts += 1;
+      const binding = decodeURIComponent(request.url.split("/").at(-1) ?? "");
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        plugin: string;
+        config: Record<string, unknown>;
+      };
+      if (binding === "me") meInstallationPuts += 1;
+      const installation = {
+        binding,
+        plugin: body.plugin,
+        protocolVersion: 1,
+        config: body.config,
+        state: "active",
+        errorCode: null,
+      };
+      const existing = installations.findIndex((item) => item.binding === binding);
+      if (existing >= 0) installations[existing] = installation;
+      else installations.push(installation);
       response.end(
         JSON.stringify({
-          installation: {
-            binding: "me",
-            plugin: "me",
-            protocolVersion: 1,
-            config: {},
-            state: "active",
-            errorCode: null,
-          },
+          installation,
         }),
       );
     } else if (request.url === "/api/v1/mcp/sites") {
@@ -720,7 +745,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
         blocked.started();
         await blocked.wait;
       }
-      response.end(JSON.stringify({ sites: [site] }));
+      response.end(JSON.stringify({ sites: [{ ...site, plugins: installations }] }));
     } else if (request.url === "/api/v1/mcp/runtime-contract")
       response.end(JSON.stringify({ contract: runtimeContract }));
     else response.writeHead(404).end('{"error":"not_found"}');
@@ -810,6 +835,13 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     uri: "intern://sites/docs/workspace",
     mimeType: "application/json",
   });
+  const enabledD1 = await client.callTool({
+    name: "intern_enable_site_plugin",
+    arguments: { site: "docs", binding: "d1", plugin: "d1", config: {} },
+  });
+  expect(enabledD1.structuredContent).toMatchObject({
+    installation: { binding: "d1", plugin: "d1", state: "active" },
+  });
 
   // Test tracked and untracked model edits without leaking ignored files or mutating the checkout.
   const previewTempsBefore = await previewTemporaryDirectories(previewTmp);
@@ -860,11 +892,14 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     await fetch(new URL("/.intern/runtime.js", localTestResult.test.url))
   ).text();
   expect(runtimeScript).toContain("resolveRuntime");
-  expect(runtimeScript).toContain("transport:Object.freeze({version:1,invoke})");
-  expect(runtimeScript).toContain("plugins:Object.freeze({me})");
-  const initialMe = await (
-    await fetch(new URL("/.intern/api/me", localTestResult.test.url))
-  ).json();
+  expect(runtimeScript).toContain("const transport=Object.freeze({version:1,invoke})");
+  expect(runtimeScript).toContain("const plugins=new Proxy");
+  const initialMe = await invokePreview(
+    localTestResult.test.url,
+    "me",
+    "get",
+    undefined,
+  );
   expect(initialMe).toMatchObject({
     id: "usr_1",
     email: "ada@example.com",
@@ -877,20 +912,14 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     },
     viewer: { userId: "usr_1", orgId: "org_1", orgSlug: "acme", orgRole: "admin" },
   });
-  const updatedMe = await (
-    await fetch(new URL("/.intern/api/me", localTestResult.test.url), {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: "Ada Lovelace",
-        profilePicture: {
-          data: "AP8=",
-          contentType: "image/png",
-          filename: "ada.png",
-        },
-      }),
-    })
-  ).json();
+  const updatedMe = await invokePreview(localTestResult.test.url, "me", "update", {
+    name: "Ada Lovelace",
+    profilePicture: {
+      bytes: new Uint8Array([0, 255]),
+      contentType: "image/png",
+      filename: "ada.png",
+    },
+  });
   expect(updatedMe).toMatchObject({
     name: "Ada Lovelace",
     profilePicture: {
@@ -898,6 +927,22 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
       contentType: "image/png",
     },
   });
+  await invokePreview(localTestResult.test.url, "d1", "exec", {
+    sql: "CREATE TABLE proof (id INTEGER PRIMARY KEY, value TEXT)",
+  });
+  await invokePreview(localTestResult.test.url, "d1", "query", {
+    sql: "INSERT INTO proof (value) VALUES (?)",
+    params: ["persisted"],
+    mode: "run",
+  });
+  await expect(
+    invokePreview(localTestResult.test.url, "d1", "query", {
+      sql: "SELECT value FROM proof WHERE id = ?",
+      params: [1],
+      mode: "first",
+      columnName: "value",
+    }),
+  ).resolves.toBe("persisted");
   expect(
     await (await fetch(new URL("/untracked.txt", localTestResult.test.url))).text(),
   ).toBe("included untracked edit\n");
@@ -924,9 +969,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   const refreshedHTML = await (await fetch(refreshedURL)).text();
   expect(refreshedHTML).toContain('<script src="/.intern/runtime.js"></script>');
   expect(refreshedHTML).toContain("refreshed local preview\n");
-  expect(
-    await (await fetch(new URL("/.intern/api/me", refreshedURL))).json(),
-  ).toMatchObject({
+  expect(await invokePreview(refreshedURL, "me", "get", undefined)).toMatchObject({
     name: "Ada",
     profilePicture: { url: "https://images.test/ada.png" },
   });
@@ -1123,3 +1166,78 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   for (const directory of finalCreatedTemps)
     await expect(fs.stat(directory)).rejects.toThrow();
 }, 30_000);
+
+async function invokePreview(
+  previewURL: string,
+  binding: string,
+  operation: string,
+  input: unknown,
+): Promise<any> {
+  const response = await fetch(new URL("/.intern/api/v1/invoke", previewURL), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ binding, operation, input: encodeTestWire(input) }),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`preview invocation failed with HTTP ${response.status}: ${text}`);
+  }
+  try {
+    return decodeTestWire(JSON.parse(text));
+  } catch (error) {
+    throw new Error(
+      `preview invocation returned invalid JSON from ${response.url}: ${text}`,
+      { cause: error },
+    );
+  }
+}
+
+function encodeTestWire(value: unknown): unknown {
+  if (value === undefined) return { type: "undefined" };
+  if (value === null) return { type: "null" };
+  if (
+    typeof value === "boolean" ||
+    typeof value === "string" ||
+    typeof value === "number"
+  ) {
+    return { type: typeof value, value };
+  }
+  if (value instanceof Uint8Array) {
+    return { type: "bytes", value: Buffer.from(value).toString("base64") };
+  }
+  if (Array.isArray(value)) {
+    return { type: "array", value: value.map(encodeTestWire) };
+  }
+  return {
+    type: "object",
+    value: Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+        key,
+        encodeTestWire(child),
+      ]),
+    ),
+  };
+}
+
+function decodeTestWire(value: any): any {
+  switch (value.type) {
+    case "undefined":
+      return undefined;
+    case "null":
+      return null;
+    case "boolean":
+    case "number":
+    case "string":
+      return value.value;
+    case "bytes":
+      return new Uint8Array(Buffer.from(value.value, "base64"));
+    case "array":
+      return value.value.map(decodeTestWire);
+    case "object":
+      return Object.fromEntries(
+        Object.entries(value.value).map(([key, child]) => [key, decodeTestWire(child)]),
+      );
+    default:
+      throw new Error("invalid test wire value");
+  }
+}

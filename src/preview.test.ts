@@ -1,13 +1,34 @@
 import http from "node:http";
 import vm from "node:vm";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { defaultLocalUser, startLocalPreviewHost } from "./preview.js";
+import { LocalD1 } from "./local-d1.js";
+import type { SitePluginInstallation } from "./api.js";
 import type { RunningSiteRuntime } from "./validation.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+test("local preview closes plugin resources when its proxy cannot listen", async () => {
+  const close = vi.spyOn(LocalD1.prototype, "close");
+  vi.spyOn(http.Server.prototype, "listen").mockImplementation(function () {
+    queueMicrotask(() => this.emit("error", new Error("injected listen failure")));
+    return this;
+  });
+  const site: RunningSiteRuntime = {
+    url: "http://127.0.0.1:1",
+    port: 1,
+    stop: async () => undefined,
+  };
+
+  await expect(
+    startLocalPreviewHost(site, defaultLocalUser(), [plugin("d1")]),
+  ).rejects.toThrow("injected listen failure");
+  expect(close).toHaveBeenCalledOnce();
 });
 
 test("local preview injects the host resolver and isolates its in-memory ME store", async () => {
@@ -56,7 +77,10 @@ test("local preview injects the host resolver and isolates its in-memory ME stor
       );
     },
   };
-  const preview = await startLocalPreviewHost(site, defaultLocalUser());
+  const preview = await startLocalPreviewHost(site, defaultLocalUser(), [
+    plugin("me"),
+    plugin("d1"),
+  ]);
   cleanups.push(() => preview.stop());
 
   // Host boundary: the checkout's HTML and asset bytes remain upstream-owned;
@@ -76,15 +100,17 @@ test("local preview injects the host resolver and isolates its in-memory ME stor
   ).text();
   expect(runtimeScript).toContain("resolveRuntime");
   expect(runtimeScript).toContain("protocolVersion:1");
-  expect(runtimeScript).toContain("transport:Object.freeze({version:1,invoke})");
+  expect(runtimeScript).toContain("const transport=Object.freeze({version:1,invoke})");
   const runtimeGlobal: Record<string, unknown> = {};
-  vm.runInNewContext(runtimeScript, {
+  const runtimeContext = vm.createContext({
     globalThis: runtimeGlobal,
     Uint8Array,
     btoa,
     fetch: (input: string, init?: RequestInit) =>
       fetch(new URL(input, preview.url), init),
   });
+  vm.runInContext(runtimeScript, runtimeContext);
+  const realm = <T>(source: string): T => vm.runInContext(source, runtimeContext) as T;
   const runtime = (
     runtimeGlobal.intern as {
       resolveRuntime(): {
@@ -98,64 +124,45 @@ test("local preview injects the host resolver and isolates its in-memory ME stor
     name: "Local Intern User",
   });
   await expect(
-    runtime.transport.invoke("me", "update", { name: "Transport Ada" }),
+    runtime.transport.invoke("me", "update", realm('({name:"Transport Ada"})')),
   ).resolves.toMatchObject({ name: "Transport Ada" });
   await expect(runtime.transport.invoke("gmail", "get")).rejects.toMatchObject({
     code: "plugin_unavailable",
+    name: "PluginUnavailableError",
   });
   await expect(runtime.transport.invoke("me", "missing")).rejects.toMatchObject({
     code: "plugin_contract_error",
+    name: "PluginContractError",
   });
-  const updated = await fetch(new URL("/.intern/api/me", preview.url), {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "Local Ada" }),
-  });
-  expect(await updated.json()).toMatchObject({ name: "Local Ada" });
-  expect(
-    await (await fetch(new URL("/.intern/api/me", preview.url))).json(),
-  ).toMatchObject({ name: "Local Ada" });
+  await expect(
+    runtime.transport.invoke("me", "update", realm("({})")),
+  ).rejects.toMatchObject({ code: "plugin_contract_error" });
 
-  const invalid = await fetch(new URL("/.intern/api/me", preview.url), {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  expect(invalid.status).toBe(400);
-
-  const maximumPicture = Buffer.alloc(8 * 1024 * 1024).toString("base64");
-  const maximumUpload = await fetch(new URL("/.intern/api/me", preview.url), {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      profilePicture: {
-        data: maximumPicture,
-        contentType: "image/png",
-        filename: "maximum.png",
-      },
-    }),
-  });
-  expect(maximumUpload.status).toBe(200);
-  const maximumProfile = (await maximumUpload.json()) as {
-    profilePicture: { url: string };
-  };
-  expect(maximumProfile.profilePicture.url).toHaveLength(
-    "data:image/png;base64,".length + maximumPicture.length,
+  // D1 boundary: the same generic transport persists relational state and
+  // round-trips bytes through the MCP-owned in-memory sandbox.
+  await runtime.transport.invoke(
+    "d1",
+    "exec",
+    realm(
+      '({sql:"CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT, payload BLOB)"})',
+    ),
   );
-
-  const oversizedPicture = Buffer.alloc(8 * 1024 * 1024 + 1).toString("base64");
-  const oversizedUpload = await fetch(new URL("/.intern/api/me", preview.url), {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      profilePicture: {
-        data: oversizedPicture,
-        contentType: "image/png",
-        filename: "oversized.png",
-      },
-    }),
-  });
-  expect(oversizedUpload.status).toBe(400);
+  await runtime.transport.invoke(
+    "d1",
+    "query",
+    realm(
+      '({sql:"INSERT INTO messages (body, payload) VALUES (?, ?)",params:["hello",{$archastroBlob:new Uint8Array([0,255])}],mode:"run"})',
+    ),
+  );
+  await expect(
+    runtime.transport.invoke(
+      "d1",
+      "query",
+      realm(
+        '({sql:"SELECT payload FROM messages WHERE id = ?",params:[1],mode:"first",columnName:"payload"})',
+      ),
+    ),
+  ).resolves.toEqual({ $archastroBlob: new Uint8Array([0, 255]) });
 
   const escaped = await absoluteTargetRequest(
     preview.url,
@@ -219,8 +226,8 @@ test("local preview bounds shutdown when a client stalls an active request", asy
   const stalled = http.request({
     host: previewURL.hostname,
     port: previewURL.port,
-    path: "/.intern/api/me",
-    method: "PATCH",
+    path: "/.intern/api/v1/invoke",
+    method: "POST",
     headers: { "content-length": "100", "content-type": "application/json" },
   });
   stalled.on("error", () => undefined);
@@ -260,4 +267,15 @@ function absoluteTargetRequest(
     request.once("error", reject);
     request.end();
   });
+}
+
+function plugin(key: "me" | "d1"): SitePluginInstallation {
+  return {
+    binding: key,
+    plugin: key,
+    protocolVersion: 1,
+    config: {},
+    state: "active",
+    errorCode: null,
+  };
 }
