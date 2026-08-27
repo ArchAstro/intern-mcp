@@ -61,6 +61,26 @@ function requestTimeRootContract(): Record<string, unknown> {
   return contract;
 }
 
+function runtimeDigestContract(): Record<string, unknown> {
+  const contract = requestTimeRootContract() as {
+    protectedFiles: Record<string, string>;
+  };
+  contract.protectedFiles["server.mjs"] = contract.protectedFiles["server.mjs"]
+    .replace(
+      "const cwd=process.cwd(); ",
+      'const cwd=process.cwd(); const runtimeDigest=process.env.INTERN_RUNTIME_DIGEST||""; ',
+    )
+    .replace(
+      'res.writeHead(200,{"content-type":',
+      'res.writeHead(200,{"x-intern-runtime-digest":runtimeDigest,"content-type":',
+    )
+    .replace(
+      '}catch{res.writeHead(404);res.end("not found")}',
+      '}catch{res.writeHead(404,{"x-intern-runtime-digest":runtimeDigest});res.end("not found")}',
+    );
+  return contract;
+}
+
 describe("Intern runtime contract parsing", () => {
   test("accepts the intern-data-owned v1 contract", () => {
     expect(parseSiteRuntimeContract(canonical)).toMatchObject({
@@ -69,12 +89,15 @@ describe("Intern runtime contract parsing", () => {
     });
   });
 
-  test("accepts both runtime contracts during the request-time-root rollout", () => {
-    expect(requestTimeRootContract()).toEqual(canonical);
+  test("accepts every runtime contract during the runtime-digest rollout", () => {
+    expect(runtimeDigestContract()).toEqual(canonical);
     expect(parseSiteRuntimeContract(previousCanonical)).toMatchObject({
       version: "intern-node-static-v1",
     });
     expect(parseSiteRuntimeContract(requestTimeRootContract())).toMatchObject({
+      version: "intern-node-static-v1",
+    });
+    expect(parseSiteRuntimeContract(runtimeDigestContract())).toMatchObject({
       version: "intern-node-static-v1",
     });
   });
