@@ -269,7 +269,7 @@ async function verifyCandidate(
 
 function nextAction(host: SetupHost, hostInstruction?: string): string {
   if (host === "pi") {
-    return `${hostInstruction ?? "Pi requires its MCP adapter: pi install npm:pi-mcp-adapter\n"}Start a new Pi session, then ask it to run intern_auth_status.\n`;
+    return `${hostInstruction ?? "Pi requires its MCP adapter: pi install npm:pi-mcp-adapter\n"}Start a new Pi session, then ask it to build a site.\n`;
   }
   const sessionName: Record<Exclude<SetupHost, "pi">, string> = {
     codex: "Codex task",
@@ -279,7 +279,7 @@ function nextAction(host: SetupHost, hostInstruction?: string): string {
     opencode: "OpenCode session",
     rovodev: "Rovo Dev session",
   };
-  return `Start a new ${sessionName[host]}, then ask it to run intern_auth_status.\n`;
+  return `Start a new ${sessionName[host]}, then ask it to build a site.\n`;
 }
 
 async function runCommand(

@@ -55,6 +55,16 @@ describe("published installation guide", () => {
     expect(readmeFlat).toContain(nextAction);
   });
 
+  test("does not tell users to run intern_auth_status after setup", () => {
+    const nextActions = readme.slice(
+      readme.indexOf("### Host commands and next actions"),
+      readme.indexOf("## Manual and CI authentication"),
+    );
+    expect(nextActions).toContain("ask it to build a site");
+    expect(nextActions).not.toContain("intern_auth_status");
+    expect(readme).not.toMatch(/ask it to run `intern_auth_status`/i);
+  });
+
   test("keeps profile tokens as an explicit manual and CI alternative", () => {
     expect(readme).toMatch(/## Manual and CI authentication/);
     expect(readme).toContain("INTERN_ACCESS_TOKEN");

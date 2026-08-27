@@ -772,7 +772,8 @@ setInterval(() => {}, 60000);
       write: (message) => output.push(message),
     });
     expect(output.join("")).toContain(expected);
-    expect(output.join("")).toContain("intern_auth_status");
+    expect(output.join("")).toContain("ask it to build a site");
+    expect(output.join("")).not.toContain("intern_auth_status");
   });
 
   it("validates the token, stores it privately, then configures Codex", async () => {
@@ -1404,7 +1405,8 @@ setInterval(() => {}, 60000);
       // exits without Ctrl-C even though the stdin pipe is still open.
       expect(result, err).toEqual({ code: 0, signal: null });
       expect(out).toContain("Intern connected to Cursor CLI as Acme · admin");
-      expect(out).toContain("intern_auth_status");
+      expect(out).toContain("ask it to build a site");
+      expect(out).not.toContain("intern_auth_status");
       expect(out).not.toContain(token);
       expect(err).not.toContain(token);
       expect(err).toContain("Paste Intern access token");
