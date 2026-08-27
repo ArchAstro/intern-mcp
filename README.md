@@ -27,20 +27,20 @@ agent starts at the same time. Users do not normally need to sign in again.
 ### Host commands and next actions
 
 - Codex: run the command above with `setup --host codex`. Start a new Codex task,
-  then ask it to run `intern_auth_status`.
+  then ask it to build a site.
 - Claude Code: use `setup --host claude`. Start a new Claude Code session, then
-  ask it to run `intern_auth_status`.
-- Grok: use `setup --host grok`. Start a new Grok session, then ask it to run
-  `intern_auth_status`.
+  ask it to build a site.
+- Grok: use `setup --host grok`. Start a new Grok session, then ask it to build a
+  site.
 - Cursor CLI or the Cursor editor: use `setup --host cursor`. Start a new Cursor
-  session, then ask it to run `intern_auth_status`. Both use `~/.cursor/mcp.json`.
+  session, then ask it to build a site. Both use `~/.cursor/mcp.json`.
 - OpenCode: use `setup --host opencode`. Start a new OpenCode session, then ask
-  it to run `intern_auth_status`.
+  it to build a site.
 - Rovo Dev: use `setup --host rovodev`. Start a new Rovo Dev session, then ask it
-  to run `intern_auth_status`.
+  to build a site.
 - Pi: use `setup --host pi`, then run `pi install npm:pi-mcp-adapter`. Start a new
-  Pi session, then ask it to run `intern_auth_status`. Pi needs the adapter
-  because its core CLI does not speak MCP.
+  Pi session, then ask it to build a site. Pi needs the adapter because its core
+  CLI does not speak MCP.
 
 Add `--verbose` to a setup command to print redacted request lifecycle
 diagnostics on stderr. Verbose output includes the method, query-free endpoint,
@@ -142,13 +142,13 @@ INTERN_MCP_PACKAGE=/absolute/path/to/intern-mcp \
   node /absolute/path/to/intern-mcp/dist/index.js setup --host codex
 ```
 
-Restart Codex after adding the server. Call `intern_auth_status`, then use
-`intern_prepare_site` and edit the returned absolute path with the coding
-host's normal filesystem tools. The prepare result includes validation against
-the authenticated Intern runtime contract. Preparation contacts public npm with
-`--prefer-online`, resolves `@archastro/intern-sdk@latest`, and writes the exact
-resolved version to `devDependencies` plus `package-lock.json`. It uses
-`--package-lock-only`, so `node_modules` never enters the guarded checkout.
+Start a new Codex task after adding the server. Use `intern_prepare_site` and
+edit the returned absolute path with the coding host's normal filesystem
+tools. The prepare result includes validation against the authenticated Intern
+runtime contract. Preparation contacts public npm with `--prefer-online`,
+resolves `@archastro/intern-sdk@latest`, and writes the exact resolved version
+to `devDependencies` plus `package-lock.json`. It uses `--package-lock-only`,
+so `node_modules` never enters the guarded checkout.
 
 ## Run against a local Firstlanding stack
 
