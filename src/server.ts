@@ -32,6 +32,7 @@ const SERVER_INSTRUCTIONS = [
   "3. intern_test_site — preview the working tree (untracked included, ignored excluded) at a loopback URL. It skips deleted tracked files, upgrades Intern-owned runtime files, installs devDependencies locally, runs the site build script when present, and writes dist/ into the checkout. Call it again after further edits. intern_stop_test stops it.",
   "For current-user or database features, add @archastro/intern-sdk as a devDependency, default-import Client, construct new Client(), and use client.me or client.d1. Never write globalThis.intern, a memory adapter, a gateway adapter, or other runtime selection into the checkout. intern_test_site injects the local runtime outside the snapshot; the production host supplies its implementation to the same committed bundle.",
   "4. Commit with the host's git, including dist/ when intern_test_site wrote it, then intern_validate_site against Intern's runtime contract.",
+  "Commit dist/ as the only generated output. Never commit dependency, cache, test-output, or framework build directories such as node_modules/, .vite/, coverage/, build/, or out/.",
   "5. intern_publish_site — pushes only a clean, committed HEAD that passed validation. The tenant does not install packages or build.",
   "Use intern_list_sites and intern_site_status to inspect. Setup users rotate access by rerunning setup and restarting the host; manual users update INTERN_ACCESS_TOKEN and restart it.",
 ].join("\n");
@@ -316,7 +317,7 @@ export function buildServer(
     {
       title: "Validate Intern commit",
       description:
-        "Validate the prepared checkout's committed HEAD against Intern's authenticated runtime contract. Checks required and protected files, package support, a committed dist/ when the site has a build script, entrypoint syntax, sandboxed startup, and an HTTP response without changing the checkout. Commit model edits first, including dist/ written by intern_test_site; dirty changes are reported in workspace status but are not part of validation.",
+        "Validate the prepared checkout's committed HEAD against Intern's authenticated runtime contract. Checks required and protected files, package support, generated-artifact exclusions, a committed root dist/ when the site has a build script, entrypoint syntax, sandboxed startup, and an HTTP response without changing the checkout. Commit model edits first, including root dist/ written by intern_test_site. Never commit dependency, cache, test-output, or other framework build directories; validation returns build_artifact_not_supported with the offending path. Dirty changes are reported in workspace status but are not part of validation.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -348,7 +349,7 @@ export function buildServer(
     {
       title: "Preview Intern working tree",
       description:
-        "Validate the current working tree, replace any prior preview for this site, and serve a temporary snapshot at a loopback HTTP URL. Includes uncommitted tracked and untracked files, excludes ignored files, and skips tracked files deleted on disk. Installs devDependencies locally, runs the site build script when present, and writes dist/ plus Intern-owned runtime upgrades into the checkout so they can be committed. Call it again after edits to refresh the snapshot.",
+        "Validate the current working tree, replace any prior preview for this site, and serve a temporary snapshot at a loopback HTTP URL. Includes uncommitted tracked and untracked files, excludes ignored files, and skips tracked files deleted on disk. Installs devDependencies and keeps dependency/cache trees in a cleaned temporary snapshot, runs the site build script when present, and writes root dist/ plus Intern-owned runtime upgrades into the checkout so they can be committed. Commit root dist/ as the only generated output; never stage node_modules/, caches, test output, or other framework build directories. Call it again after edits to refresh the snapshot.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -401,7 +402,7 @@ export function buildServer(
     {
       title: "Publish Intern site",
       description:
-        "Validate and push the clean, committed HEAD of a prepared Intern checkout. Refuses runtime-incompatible changes, missing committed build output when the site has a build script, dirty trees, detached HEADs, unexpected remotes, and non-fast-forward pushes. The tenant serves the committed tree and does not install or build.",
+        "Validate and push the clean, committed HEAD of a prepared Intern checkout. Refuses runtime-incompatible changes, generated output outside root dist/, missing committed root dist/ when the site has a build script, dirty trees, detached HEADs, unexpected remotes, and non-fast-forward pushes. The tenant serves root dist/ and does not install or build; never commit node_modules/, caches, test output, or other framework build directories.",
       inputSchema: z.object({ site: siteSlug }),
       outputSchema: z.object({
         site: siteSchema,
@@ -499,8 +500,8 @@ export function buildServer(
               `Work on Intern site "${site}".`,
               "1. Call intern_auth_status. If unauthorized, ask the user to create a token at https://tryintern.dev/connect, run the setup command shown there, and restart the MCP host. Manual configurations instead update INTERN_ACCESS_TOKEN. Never ask them to paste the token into chat.",
               `2. Call intern_prepare_site with site "${site}". Edit files at the returned workspace.path using this host's filesystem tools.`,
-              "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). It runs the local install and build, writes dist/ into the checkout, and skips deleted tracked files. Call it again after further edits. intern_stop_test stops the preview.",
-              "4. Commit with this host's git, including any dist/ intern_test_site wrote, then call intern_validate_site.",
+              "3. Intern never stages or commits files. After edits, call intern_test_site to preview the working tree (untracked included, ignored excluded). It runs the local install and build in a cleaned temporary snapshot, writes root dist/ into the checkout, and skips deleted tracked files. Call it again after further edits. intern_stop_test stops the preview.",
+              "4. Commit with this host's git, including root dist/ as the only generated output, then call intern_validate_site. Never stage node_modules/, caches, test output, or other framework build directories; validation reports build_artifact_not_supported with the offending path.",
               "5. Call intern_publish_site only when validation is valid and the worktree is clean.",
             ].join("\n"),
           },

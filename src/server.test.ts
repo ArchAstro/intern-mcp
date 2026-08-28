@@ -512,6 +512,9 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     expect(client.getInstructions()).toMatch(/never stages or commits/i);
     expect(client.getInstructions()).toContain("default-import Client");
     expect(client.getInstructions()).toContain("Never write globalThis.intern");
+    expect(client.getInstructions()).toContain(
+      "Commit dist/ as the only generated output",
+    );
 
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
@@ -553,6 +556,15 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
       readOnlyHint: false,
       idempotentHint: true,
     });
+    for (const name of [
+      "intern_validate_site",
+      "intern_test_site",
+      "intern_publish_site",
+    ]) {
+      const description = tools.tools.find((tool) => tool.name === name)?.description;
+      expect(description, name).toMatch(/root dist\//i);
+      expect(description, name).toMatch(/node_modules|dependency/i);
+    }
 
     const prompts = await client.listPrompts();
     const promptNames = prompts.prompts.map((prompt) => prompt.name);
@@ -565,6 +577,12 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     expect(workflow.messages[0]?.content).toMatchObject({
       type: "text",
       text: expect.stringContaining('intern_prepare_site with site "docs"'),
+    });
+    expect(workflow.messages[0]?.content).toMatchObject({
+      type: "text",
+      text: expect.stringMatching(
+        /root dist\/.*only generated output[\s\S]*never stage node_modules\//i,
+      ),
     });
 
     const resources = await client.listResources();
@@ -1011,6 +1029,72 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await fs.rm(path.join(structured.workspace.path, ".gitignore"));
   await fs.rm(path.join(structured.workspace.path, "untracked.txt"));
   await fs.rm(path.join(structured.workspace.path, "ignored.txt"));
+  await exec("git", ["config", "user.email", "proof@localhost"], {
+    cwd: structured.workspace.path,
+  });
+  await exec("git", ["config", "user.name", "Proof"], {
+    cwd: structured.workspace.path,
+  });
+
+  // A committed dependency tree is refused while deployable dist/ remains valid.
+  await fs.mkdir(path.join(structured.workspace.path, "dist"));
+  await fs.writeFile(
+    path.join(structured.workspace.path, "dist/index.html"),
+    "deployable output\n",
+  );
+  await fs.mkdir(path.join(structured.workspace.path, "dist/build"));
+  await fs.writeFile(
+    path.join(structured.workspace.path, "dist/build/chunk.js"),
+    "export default 1;\n",
+  );
+  await fs.mkdir(path.join(structured.workspace.path, "node_modules/fake-package"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(structured.workspace.path, "node_modules/fake-package/index.js"),
+    "export default 1;\n",
+  );
+  await exec("git", ["add", "--force", "dist", "node_modules"], {
+    cwd: structured.workspace.path,
+  });
+  await exec("git", ["commit", "-m", "accidentally commit dependencies"], {
+    cwd: structured.workspace.path,
+  });
+  const artifactValidation = await client.callTool({
+    name: "intern_validate_site",
+    arguments: { site: "docs" },
+  });
+  expect(artifactValidation.structuredContent).toMatchObject({
+    validation: {
+      valid: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "build_artifact_not_supported",
+          path: "node_modules",
+        }),
+      ]),
+    },
+  });
+  expect(
+    (
+      artifactValidation.structuredContent as {
+        validation: { issues: Array<{ path?: string }> };
+      }
+    ).validation.issues,
+  ).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ path: "dist/build" })]),
+  );
+  const artifactPublish = await client.callTool({
+    name: "intern_publish_site",
+    arguments: { site: "docs" },
+  });
+  expect(artifactPublish.isError).toBe(true);
+  await exec("git", ["rm", "-r", "node_modules"], {
+    cwd: structured.workspace.path,
+  });
+  await exec("git", ["commit", "-m", "keep only deployable output"], {
+    cwd: structured.workspace.path,
+  });
 
   // The coding host first makes a committed change that the backend cannot run.
   const invalidPackage = {
@@ -1025,12 +1109,6 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     path.join(structured.workspace.path, "src/main.js"),
     "export const = broken;\n",
   );
-  await exec("git", ["config", "user.email", "proof@localhost"], {
-    cwd: structured.workspace.path,
-  });
-  await exec("git", ["config", "user.name", "Proof"], {
-    cwd: structured.workspace.path,
-  });
   await exec("git", ["add", "package.json", "package-lock.json", "src/main.js"], {
     cwd: structured.workspace.path,
   });
@@ -1108,6 +1186,18 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     "main:index.html",
   ]);
   expect(observed.stdout).toBe("published through MCP\n");
+  const observedDist = await exec("git", [
+    `--git-dir=${remote}`,
+    "show",
+    "main:dist/index.html",
+  ]);
+  expect(observedDist.stdout).toBe("deployable output\n");
+  const observedNestedDist = await exec("git", [
+    `--git-dir=${remote}`,
+    "show",
+    "main:dist/build/chunk.js",
+  ]);
+  expect(observedNestedDist.stdout).toBe("export default 1;\n");
 
   // A stop arriving while preview authorization is in flight forms a barrier and leaves no orphan.
   let markSiteListStarted = () => {};

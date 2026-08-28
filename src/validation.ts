@@ -14,6 +14,39 @@ import {
 
 const exec = promisify(execFile);
 export const publicNPMRegistry = "https://registry.npmjs.org";
+const forbiddenSiteArtifactDirectories = new Set([
+  ".angular",
+  ".astro",
+  ".cache",
+  ".docusaurus",
+  ".expo",
+  ".firebase",
+  ".gatsby",
+  ".netlify",
+  ".next",
+  ".npm",
+  ".nuxt",
+  ".output",
+  ".parcel-cache",
+  ".pnpm-store",
+  ".svelte-kit",
+  ".serverless",
+  ".turbo",
+  ".vercel",
+  ".vite",
+  ".wrangler",
+  ".yarn",
+  "blob-report",
+  "bower_components",
+  "build",
+  "coverage",
+  "node_modules",
+  "out",
+  "playwright-report",
+  "storybook-static",
+  "target",
+  "test-results",
+]);
 
 export interface ValidationIssue {
   code: string;
@@ -144,6 +177,7 @@ export async function validateSite(
     [
       "unsupported_file_type",
       "symlink_not_supported",
+      "build_artifact_not_supported",
       "missing_required_file",
       "required_file_not_regular",
       "launcher_not_executable",
@@ -236,8 +270,20 @@ async function walk(
           relative,
         ),
       );
-    else if (entry.isDirectory()) await walk(root, absolute, issues, entries);
-    else if (!entry.isFile())
+    else if (entry.isDirectory()) {
+      const insideDeployableDist = relative === "dist" || relative.startsWith("dist/");
+      if (!insideDeployableDist && forbiddenSiteArtifactDirectories.has(entry.name)) {
+        issues.push(
+          error(
+            "build_artifact_not_supported",
+            `${entry.name}/ is local or generated output; commit deployable output in dist/ instead`,
+            relative,
+          ),
+        );
+        continue;
+      }
+      await walk(root, absolute, issues, entries);
+    } else if (!entry.isFile())
       issues.push(
         error(
           "unsupported_file_type",
@@ -296,7 +342,8 @@ export async function runLocalSiteBuild(root: string): Promise<ValidationIssue[]
     ...asRecord(packageJSON.devDependencies),
     ...asRecord(packageJSON.optionalDependencies),
   });
-  const environment = npmEnvironment(root);
+  const npmCache = await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-npm-cache-"));
+  const environment = { ...npmEnvironment(root), npm_config_cache: npmCache };
   const nodeModules = path.join(root, "node_modules");
   const removeInstalledModules =
     installable.length > 0 &&
@@ -355,9 +402,12 @@ export async function runLocalSiteBuild(root: string): Promise<ValidationIssue[]
     }
     return [];
   } finally {
-    if (removeInstalledModules) {
-      await fs.rm(nodeModules, { recursive: true, force: true });
-    }
+    await Promise.all([
+      fs.rm(npmCache, { recursive: true, force: true }),
+      ...(removeInstalledModules
+        ? [fs.rm(nodeModules, { recursive: true, force: true })]
+        : []),
+    ]);
   }
 }
 
