@@ -206,6 +206,11 @@ boolean switches are intentionally not supported.
 
 Once the local result is correct, commit the change — including `dist/` when the preview wrote it — and call `intern_validate_site`. It checks the exact committed tree: required and protected runtime files, dependencies the backend does not install, committed build output when a build script exists, JavaScript syntax, production-style startup, and an HTTP probe. `intern_publish_site` reruns the same commit validation and refuses invalid or dirty worktrees. The MCP never stages or commits files. The tenant serves the committed tree and does not install packages or build.
 
+`dist/` is the only generated output that belongs in a site commit. Dependency,
+cache, test-output, and framework build directories such as `node_modules/`,
+`.vite/`, `coverage/`, `build/`, and `out/` are local-only and validation rejects
+them even when Git tracks them.
+
 For each SSH clone or push, Intern MCP creates or reuses one local Ed25519 key and sends only its public half to Intern. Intern returns a five-minute user certificate plus the pinned `git.tryintern.dev` host key. MCP supplies those files only to that Git process; it never edits global Git config, `~/.ssh/config`, or the user's `known_hosts`. The MCP replaces the current certificate as needed and retains the private key for future short-lived certificates.
 
 The current runtime contract is deliberately narrow: Intern runs its protected `server.mjs` through `run-site.sh`, supplies `PORT`, and does not install package dependencies on the tenant. `server.mjs` serves `dist/` when `dist/index.html` exists, otherwise the site root, and maps common static types (including `.svg`, `.woff2`, and `.png`). A model can edit HTML, CSS, browser JavaScript, and assets; the MCP runs the local Vite build so those assets can be committed. Runtime launcher changes are rejected because the current Git publish path does not restart the site process.
