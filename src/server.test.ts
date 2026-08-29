@@ -496,6 +496,15 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
       hasCredentials: async () => false,
     } as never,
     {
+      session: async () => ({
+        user: {
+          id: "user-1",
+          org: "org-1",
+          org_name: "Example",
+          org_role: "admin",
+        },
+        org: { id: "intern-org-1", slug: "example", state: "active" },
+      }),
       listSites: async () => [{ slug: "docs" }, { slug: "blog" }],
     } as never,
     {} as never,
@@ -515,6 +524,8 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     expect(client.getInstructions()).toContain(
       "Commit dist/ as the only generated output",
     );
+    expect(client.getInstructions()).toMatch(/team-facing page/i);
+    expect(client.getInstructions()).toMatch(/unless.*another destination/i);
 
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
@@ -590,6 +601,29 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
       resources.resources.find((resource) => resource.uri === "intern://session")
         ?.description,
     ).toMatch(/does not include credentials/i);
+    expect(resources.resources.map((resource) => resource.uri)).toEqual(
+      expect.arrayContaining([
+        "intern://sites",
+        "intern://sites/docs/manifest",
+        "intern://authoring-guide/v1",
+      ]),
+    );
+    const guide = await client.readResource({
+      uri: "intern://authoring-guide/v1",
+    });
+    expect(guide.contents[0]).toMatchObject({
+      mimeType: "text/markdown",
+      text: expect.stringContaining("@archastro/intern-sdk"),
+    });
+    expect(guide.contents[0]).toMatchObject({
+      text: expect.stringContaining("Never use `globalThis.intern`"),
+    });
+    const manifest = await client.readResource({
+      uri: "intern://sites/docs/manifest",
+    });
+    expect(JSON.parse(String(manifest.contents[0]?.text))).toEqual({
+      site: expect.objectContaining({ slug: "docs" }),
+    });
   } finally {
     await client.close();
     await server.close();
@@ -846,6 +880,35 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   expect(resources.resources.map((resource) => resource.uri)).toContain(
     "intern://sites/docs/workspace",
   );
+  expect(resources.resources.map((resource) => resource.uri)).toEqual(
+    expect.arrayContaining([
+      "intern://authoring-guide/v1",
+      "intern://sites/docs/manifest",
+    ]),
+  );
+  const guideResource = await client.readResource({
+    uri: "intern://authoring-guide/v1",
+  });
+  expect(guideResource.contents[0]).toMatchObject({
+    uri: "intern://authoring-guide/v1",
+    mimeType: "text/markdown",
+    text: expect.stringContaining("client.d1.prepare"),
+  });
+  const manifestResource = await client.readResource({
+    uri: "intern://sites/docs/manifest",
+  });
+  expect(manifestResource.contents[0]).toMatchObject({
+    uri: "intern://sites/docs/manifest",
+    mimeType: "application/json",
+  });
+  expect(JSON.parse(String(manifestResource.contents[0]?.text))).toEqual({
+    site: expect.objectContaining({
+      slug: "docs",
+      plugins: expect.arrayContaining([
+        expect.objectContaining({ binding: "me", state: "active" }),
+      ]),
+    }),
+  });
   const workspaceResource = await client.readResource({
     uri: "intern://sites/docs/workspace",
   });
