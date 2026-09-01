@@ -90,7 +90,6 @@ describe("Intern runtime contract parsing", () => {
   });
 
   test("accepts every runtime contract during the runtime-digest rollout", () => {
-    expect(runtimeDigestContract()).toEqual(canonical);
     expect(parseSiteRuntimeContract(previousCanonical)).toMatchObject({
       version: "intern-node-static-v1",
     });

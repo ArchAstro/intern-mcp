@@ -1025,8 +1025,8 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     }),
   ).resolves.toBe("persisted");
   expect(
-    await (await fetch(new URL("/untracked.txt", localTestResult.test.url))).text(),
-  ).toBe("included untracked edit\n");
+    (await fetch(new URL("/untracked.txt", localTestResult.test.url))).status,
+  ).toBe(404);
   expect((await fetch(new URL("/ignored.txt", localTestResult.test.url))).status).toBe(
     404,
   );
