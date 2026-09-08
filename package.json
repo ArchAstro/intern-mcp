@@ -1,6 +1,7 @@
 {
   "name": "@archastro/intern-mcp",
   "version": "0.4.2",
+  "license": "MIT",
   "description": "Local MCP server for building and publishing TryIntern sites",
   "type": "module",
   "engines": {
@@ -38,12 +39,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check:runtime-contract": "node scripts/runtime-contract.mjs check",
-    "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:package && npm run test:sdk",
+    "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:distribution && npm run test:package && npm run test:sdk",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "prepack": "npm run build",
     "test:harnesses": "node scripts/harness-install-smoke.mjs",
+    "test:distribution": "node --test test/distribution-contract.mjs",
+    "test:remote-install": "node --test test/remote-install.e2e.mjs",
     "test:package": "node scripts/package-smoke.mjs",
     "test:sdk": "node scripts/sdk-compatibility.mjs",
     "test": "vitest run",

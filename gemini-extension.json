@@ -1,0 +1,9 @@
+{
+  "name": "intern",
+  "version": "1.0.0",
+  "mcpServers": {
+    "intern": {
+      "httpUrl": "https://tryintern.dev/mcp"
+    }
+  }
+}

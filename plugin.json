@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "intern",
+  "version": "1.0.0",
+  "license": "MIT",
+  "description": "Build private team sites with your agent.",
+  "author": {
+    "name": "ArchAstro"
+  },
+  "homepage": "https://tryintern.dev",
+  "repository": "https://github.com/ArchAstro/intern-mcp",
+  "keywords": ["internal-sites", "dashboards", "team"]
+}

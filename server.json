@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "dev.tryintern/intern",
+  "title": "Intern",
+  "description": "Build private team sites with your agent.",
+  "version": "1.0.0",
+  "websiteUrl": "https://tryintern.dev",
+  "icons": [
+    {
+      "src": "https://tryintern.dev/brand-mark.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["any"]
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/ArchAstro/intern-mcp",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://tryintern.dev/mcp"
+    }
+  ]
+}
