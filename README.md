@@ -1,6 +1,19 @@
 # Intern MCP
 
-Local stdio MCP server for working on Intern-hosted sites through guarded Git checkouts.
+Build private team sites with your agent. This repository contains the hosted connection manifests and the local MCP implementation.
+
+## Connect to the hosted MCP
+
+Use `https://tryintern.dev/mcp` with a remote MCP client and sign in when prompted.
+Host-specific instructions are at [tryintern.dev/connect](https://tryintern.dev/connect).
+
+Try: “Turn this release plan into a private launch room.”
+Attach your plan or use details already in the conversation.
+
+The root `mcp.json`, `plugin.json`, `server.json`, and `gemini-extension.json`
+describe the hosted connection. These are prepared listing artifacts; directory acceptance and release are tracked in [submission review](submissions/review.md).
+
+The local server below supports Git checkouts and local preview.
 
 ## Install in a coding harness
 
@@ -47,10 +60,6 @@ diagnostics on stderr. Verbose output includes the method, query-free endpoint,
 status, duration, and allowlisted response metadata. It never prints access or
 refresh tokens, request headers, response bodies, cookies, or the device code.
 
-The TryIntern Connect page remains on the manual-token flow until the new npm
-release passes the public-package release gate. This README documents the
-prepared package behavior; it does not claim that frontend switch is deployed.
-
 The setup command resolves npm's stable `latest` release and saves a launcher
 that checks that channel whenever the MCP host starts. The saved launcher uses
 `--prefer-online` to refresh stale package metadata instead of trusting its npx
@@ -58,7 +67,7 @@ cache; the one-time setup command does not expose that runtime policy. To pin a
 reviewed build instead, run setup with `INTERN_MCP_PACKAGE` set to a complete
 package spec such as `@archastro/intern-mcp@0.1.1`, or to a package tarball.
 
-The repository is private; the package is public on npm.
+The repository and npm package are public.
 
 Maintainers run the manual **release** workflow from `main` and choose a patch,
 minor, or major bump. It verifies the package, commits the version change on a
@@ -218,6 +227,18 @@ The current runtime contract is deliberately narrow: Intern runs its protected `
 In production, `intern-fe` authenticates to private `intern-ctl` gRPC with a Google service-account ID token bound to the control audience and forwards actor fields only after resolving the user at the HTTPS edge. Aster uses an explicit `archastro-dev` override. Git clone and publish use the short-lived SSH user certificates described above. The local launcher overrides that path for Aster's development gateway; an explicit `INTERN_GIT_SSH_COMMAND` still takes precedence.
 
 ## Development checks
+
+For changes to the hosted listing artifacts, run:
+
+```sh
+npm run test:distribution
+npm run test:remote-install
+```
+
+The first checks the checked-in connection manifests. The second makes real,
+unauthenticated HTTPS requests to production and follows the MCP challenge to
+OAuth discovery. It does not register a client, sign in, exchange a token, or
+create a site. Passing it is not proof of a completed host connection.
 
 Run the complete local gate from the repository root:
 
