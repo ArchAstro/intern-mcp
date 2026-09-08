@@ -71,8 +71,13 @@ describe("published installation guide", () => {
     expect(readme).toContain("setup --host codex --token");
   });
 
-  test("does not claim the TryIntern frontend already uses the new installer", () => {
-    expect(readmeFlat).toMatch(/TryIntern Connect.*remains on the manual-token flow/i);
-    expect(readme).toMatch(/public-package release gate/i);
+  test("distinguishes hosted sign-in from local installation and pending listings", () => {
+    const hosted = readme.slice(0, readme.indexOf("## Install in a coding harness"));
+    expect(hosted).toContain("https://tryintern.dev/mcp");
+    expect(hosted).toMatch(/sign in when prompted/i);
+    expect(hosted).toContain("https://tryintern.dev/connect");
+    expect(hosted).toMatch(/prepared listing artifacts/i);
+    expect(hosted).toContain("submissions/review.md");
+    expect(hosted).not.toMatch(/remains on the manual-token flow/i);
   });
 });
