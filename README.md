@@ -1,21 +1,73 @@
 # Intern MCP
 
-Build private team sites with your agent. This repository contains the hosted connection manifests and the local MCP implementation.
-
-## Connect to the hosted MCP
-
-Use `https://tryintern.dev/mcp` with a remote MCP client and sign in when prompted.
-Host-specific instructions are at [tryintern.dev/connect](https://tryintern.dev/connect).
-
-Try: “Turn this release plan into a private launch room.”
-Attach your plan or use details already in the conversation.
+Build private team sites with your agent. Intern hosts the site at a durable
+company URL, with company sign in, a database, and file storage already wired
+up. This repository contains the hosted connection manifests and the local
+MCP implementation.
 
 The root `mcp.json`, `plugin.json`, `server.json`, and `gemini-extension.json`
 describe the hosted connection. These are prepared listing artifacts; directory acceptance and release are tracked in [submission review](submissions/review.md).
 
-The local server below supports Git checkouts and local preview.
+## Add Intern to your coding agent
 
-## Install in a coding harness
+The hosted endpoint is `https://tryintern.dev/mcp`, using Streamable HTTP with
+OAuth 2.0 and dynamic client registration. Each command below opens a browser
+to sign in to TryIntern and approve the connection, then start a new session
+and ask your agent to build a site.
+
+Try: “Turn this release plan into a private launch room.”
+Attach your plan or use details already in the conversation.
+
+**Claude Code**
+
+```sh
+claude mcp add --transport http --scope user intern https://tryintern.dev/mcp
+```
+
+**Codex**
+
+```sh
+codex mcp add intern --url https://tryintern.dev/mcp
+codex mcp login intern
+```
+
+**Grok**
+
+```sh
+grok mcp add --transport http intern https://tryintern.dev/mcp
+```
+
+**Cursor**
+
+[Add to Cursor](https://cursor.com/install-mcp?name=intern&config=eyJ1cmwiOiJodHRwczovL3RyeWludGVybi5kZXYvbWNwIn0%3D)
+
+GitHub does not render `cursor://` links, so this uses Cursor's web form of the same install link. It opens Cursor with the hosted endpoint prefilled.
+
+**OpenCode**
+
+Add this to your OpenCode config:
+
+```json
+{
+  "mcp": {
+    "intern": {
+      "type": "remote",
+      "url": "https://tryintern.dev/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+Host-specific notes and additional hosts, including Rovo Dev and Pi, are at
+[tryintern.dev/connect](https://tryintern.dev/connect).
+
+## Local setup, for git based publishing
+
+The hosted connection above edits and publishes a site directly. For a git
+based workflow, where the agent works in a checkout and you can inspect
+commits before they publish, install the local `@archastro/intern-mcp` npm
+package instead. The local server supports Git checkouts and local preview.
 
 Intern MCP is the public `@archastro/intern-mcp` npm package and requires
 Node.js 22 or newer. Run one command, replacing `codex` with your host when
