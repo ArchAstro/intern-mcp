@@ -24,13 +24,11 @@ checked at submission time.
 
 ### MCP Registry (registry.modelcontextprotocol.io)
 
-Doc-checked: the registry has no category taxonomy. Discovery is by search
-over `name`, `description`, and `title` in `server.json` (confirmed against
-[modelcontextprotocol.io/registry/remote-servers](https://modelcontextprotocol.io/registry/remote-servers)
-and the registry search endpoint shown in the
-[quickstart](https://modelcontextprotocol.io/registry/quickstart)). No tags
-field exists in the current schema; the description and title copy above are
-what carries the listing.
+Doc-checked: the registry has no category taxonomy and no tags field in the
+current schema. Its search parameter is a case-insensitive substring match on
+`name` only; description and title are not searched (registry API reference,
+[official-registry-api.md](https://github.com/modelcontextprotocol/registry/blob/main/docs/reference/api/official-registry-api.md)).
+The description and title copy above shows once someone opens the listing.
 
 ### Smithery
 

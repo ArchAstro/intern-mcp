@@ -99,9 +99,10 @@ only authorizes `io.github.<user-or-org>/*` names:
 }
 ```
 
-1. **[Human] Authenticate**, from the repository root, using an account with
-   admin access to the `ArchAstro` GitHub org (org-scoped device auth needs
-   org admin, not just repo write):
+1. **[Human] Authenticate**, from the repository root, using an account in
+   the `ArchAstro` GitHub org. The official docs do not state which org
+   permission level the device flow requires; expect to need org admin and
+   confirm with a real login attempt:
 
    ```sh
    mcp-publisher login github
