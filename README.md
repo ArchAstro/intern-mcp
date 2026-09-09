@@ -12,8 +12,8 @@ describe the hosted connection. These are prepared listing artifacts; directory 
 
 The hosted endpoint is `https://tryintern.dev/mcp`, using Streamable HTTP with
 OAuth 2.0 and dynamic client registration. Each command below opens a browser
-to sign in to TryIntern and approve the connection, then start a new session
-and ask your agent to build a site.
+to TryIntern; sign in when prompted and approve the connection, then start a
+new session and ask your agent to build a site.
 
 Try: “Turn this release plan into a private launch room.”
 Attach your plan or use details already in the conversation.
@@ -62,7 +62,9 @@ Add this to your OpenCode config:
 Host-specific notes and additional hosts, including Rovo Dev and Pi, are at
 [tryintern.dev/connect](https://tryintern.dev/connect).
 
-## Local setup, for git based publishing
+## Install in a coding harness
+
+Local setup, for git based publishing.
 
 The hosted connection above edits and publishes a site directly. For a git
 based workflow, where the agent works in a checkout and you can inspect
