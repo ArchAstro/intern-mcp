@@ -275,7 +275,7 @@ async function verifyStoredSession(
     const cause = error instanceof Error ? error.cause : undefined;
     if (
       cause instanceof OAuthRefreshError &&
-      cause.status === 400 &&
+      (cause.status === 400 || cause.status === 401) &&
       cause.code === "invalid_grant"
     )
       return undefined;

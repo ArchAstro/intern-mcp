@@ -141,7 +141,7 @@ describe("Intern MCP setup", () => {
       expect(await fs.readFile(file)).toEqual(contents);
     },
   );
-  it.each([200, 400, 503, "network"] as const)(
+  it.each([200, 400, 401, 429, 503, "network"] as const)(
     "retries an expired session through the real refresh endpoint (%s)",
     async (refreshStatus) => {
       let refreshes = 0;
@@ -165,7 +165,7 @@ describe("Intern MCP setup", () => {
                   }
                 : {
                     error:
-                      refreshStatus === 400
+                      refreshStatus === 400 || refreshStatus === 401
                         ? "invalid_grant"
                         : "temporarily_unavailable",
                   },
@@ -210,9 +210,9 @@ describe("Intern MCP setup", () => {
           configure,
           write: () => {},
         });
-        if (refreshStatus === 200 || refreshStatus === 400) {
+        if (refreshStatus === 200 || refreshStatus === 400 || refreshStatus === 401) {
           await expect(result).resolves.toEqual(session);
-          expect(authorize).toHaveBeenCalledTimes(refreshStatus === 400 ? 1 : 0);
+          expect(authorize).toHaveBeenCalledTimes(refreshStatus === 200 ? 0 : 1);
           expect(verifications).toBe(1);
           expect(configure).toHaveBeenCalledTimes(1);
         } else {
