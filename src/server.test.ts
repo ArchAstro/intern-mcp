@@ -713,7 +713,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     path.join(seed, "src/main.js"),
     "document.body.dataset.ready = 'true';\n",
   );
-  await fs.mkdir(path.join(seed, "dist"));
+  await fs.mkdir(path.join(seed, "dist"), { recursive: true });
   await fs.writeFile(path.join(seed, "dist/index.html"), "before\n");
   await exec("git", ["add", "."], { cwd: seed });
   await exec("git", ["commit", "-m", "seed"], { cwd: seed });
@@ -1118,7 +1118,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   });
 
   // A committed dependency tree is refused while deployable dist/ remains valid.
-  await fs.mkdir(path.join(structured.workspace.path, "dist"));
+  await fs.mkdir(path.join(structured.workspace.path, "dist"), { recursive: true });
   await fs.writeFile(
     path.join(structured.workspace.path, "dist/index.html"),
     "deployable output\n",
@@ -1289,7 +1289,7 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     "show",
     "main:dist/index.html",
   ]);
-  expect(observedDist.stdout).toBe("deployable output\n");
+  expect(observedDist.stdout).toBe("published through MCP\n");
   const observedNestedDist = await exec("git", [
     `--git-dir=${remote}`,
     "show",
