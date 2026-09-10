@@ -86,6 +86,7 @@ export class AuthClient {
       if (signal?.aborted) throw signal.reason;
       throw new Error(
         `AUTH_REQUIRED: Intern session refresh failed; run setup again${errorMessage(error)}`,
+        { cause: error },
       );
     }
   }

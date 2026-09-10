@@ -52,6 +52,7 @@ describe("WorkspaceManager", () => {
     await fs.writeFile(path.join(seed, "run-site.sh"), launcher, { mode: 0o750 });
     await fs.mkdir(path.join(seed, "assets"));
     await fs.writeFile(path.join(seed, "assets/page.html"), "tracked asset\n");
+    await fs.writeFile(path.join(seed, "assets/game.js"), "window.gameReady = true;\n");
     await exec("git", ["add", "."], { cwd: seed });
     await exec("git", ["commit", "-m", "seed"], { cwd: seed });
     await exec("git", ["push", "origin", "HEAD:main"], { cwd: seed });
@@ -86,6 +87,30 @@ describe("WorkspaceManager", () => {
     expect(prepared.path).toBe(path.join(workspaceRoot, "acme", "docs"));
     expect(prepared.dirty).toBe(false);
     expect(credentialRequests).toEqual([remote]);
+
+    // A legacy static checkout has no dist directory. Its public assets must
+    // still load, without making repository internals accessible over HTTP.
+    const legacyPreview = await manager.testWorkingTree("acme", site, contract);
+    expect(legacyPreview.test.running).toBe(true);
+    if (!legacyPreview.test.running) throw new Error("expected legacy preview");
+    try {
+      expect(await (await fetch(legacyPreview.test.url)).text()).toContain("first");
+      expect(
+        await (await fetch(new URL("/assets/game.js", legacyPreview.test.url))).text(),
+      ).toBe("window.gameReady = true;\n");
+      for (const privatePath of [
+        "/package.json",
+        "/server.mjs",
+        "/.git/config",
+        "/assets/page.html",
+      ]) {
+        expect((await fetch(new URL(privatePath, legacyPreview.test.url))).status).toBe(
+          404,
+        );
+      }
+    } finally {
+      await manager.stopTestBySlug("docs");
+    }
 
     await fs.writeFile(path.join(prepared.path, "index.html"), "uncommitted\n");
     await expect(manager.publish("acme", site, contract)).rejects.toThrow(
@@ -282,7 +307,10 @@ describe("WorkspaceManager", () => {
     );
 
     const preview = await manager.testWorkingTree("acme", site, contract);
-    expect(preview.test).toMatchObject({ running: true, source: "working-tree" });
+    expect(preview.test, JSON.stringify(preview.test.validation)).toMatchObject({
+      running: true,
+      source: "working-tree",
+    });
     if (!preview.test.running) throw new Error("expected local preview to start");
     try {
       const svg = await fetch(new URL("/icon.svg", preview.test.url));
@@ -291,6 +319,16 @@ describe("WorkspaceManager", () => {
       const html = await (await fetch(preview.test.url)).text();
       expect(html).toContain('<script src="/.intern/runtime.js"></script>');
       expect(html).toContain("built page\n");
+      for (const sensitivePath of [
+        "/package.json",
+        "/build.mjs",
+        "/server.mjs",
+        "/.git/config",
+      ]) {
+        expect((await fetch(new URL(sensitivePath, preview.test.url))).status).toBe(
+          404,
+        );
+      }
     } finally {
       await manager.stopTestBySlug("docs");
     }

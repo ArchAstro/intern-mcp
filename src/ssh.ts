@@ -37,14 +37,23 @@ export class SSHCredentialManager {
     const privateKey = path.join(directory, "id_ed25519");
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     if (!(await exists(privateKey))) {
-      await exec(
-        "ssh-keygen",
-        ["-q", "-t", "ed25519", "-N", "", "-C", "intern-mcp", "-f", privateKey],
-        {
-          timeout: 30_000,
-          maxBuffer: 1024 * 1024,
-        },
-      );
+      try {
+        await exec(
+          "ssh-keygen",
+          ["-q", "-t", "ed25519", "-N", "", "-C", "intern-mcp", "-f", privateKey],
+          {
+            timeout: 30_000,
+            maxBuffer: 1024 * 1024,
+          },
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error(
+            "Install OpenSSH (including ssh-keygen) on the computer running Intern MCP, then retry preparing the site. Your sign-in is unchanged.",
+          );
+        }
+        throw error;
+      }
     }
     await Promise.all([
       fs.chmod(privateKey, 0o600),

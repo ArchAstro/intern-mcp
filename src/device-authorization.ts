@@ -2,6 +2,15 @@ import { spawn } from "node:child_process";
 
 const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code";
 
+export class OAuthRefreshError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+  ) {
+    super(`refresh failed: ${code}`);
+  }
+}
+
 export interface DeviceAuthorizationConfig {
   platformBaseURL: string;
   publishableKey: string;
@@ -162,7 +171,7 @@ export class DeviceAuthorization {
         deadline.signal,
       );
       const body = await responseBody(response);
-      if (!response.ok) throw new Error(`refresh failed: ${errorCode(body)}`);
+      if (!response.ok) throw new OAuthRefreshError(response.status, errorCode(body));
       return this.candidate(body);
     } catch (error) {
       if (deadline.timedOut()) {

@@ -17,6 +17,37 @@ afterEach(async () =>
 );
 
 describe("SSHCredentialManager", () => {
+  test("names the OpenSSH prerequisite when ssh-keygen is missing", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-no-ssh-"));
+    roots.push(root);
+    const previousPath = process.env.PATH;
+    let minted = false;
+    const manager = new SSHCredentialManager(
+      {
+        internBaseURL: "https://tryintern.dev",
+        workspaceRoot: root,
+        configRoot: root,
+      },
+      {
+        mintSSHCertificate: async () => {
+          minted = true;
+          throw new Error("unexpected mint");
+        },
+      } as unknown as InternAPI,
+    );
+    try {
+      process.env.PATH = root;
+      await expect(
+        manager.command("stripe@git.tryintern.dev:docs.git"),
+      ).rejects.toThrow(
+        "Install OpenSSH (including ssh-keygen) on the computer running Intern MCP",
+      );
+      expect(minted).toBe(false);
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
   test("keeps the private key local and installs the requested certificate for Git", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "intern-mcp-ssh-"));
     roots.push(root);

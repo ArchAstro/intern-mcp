@@ -61,7 +61,7 @@ function requestTimeRootContract(): Record<string, unknown> {
   return contract;
 }
 
-function runtimeDigestContract(): Record<string, unknown> {
+function insecureRuntimeDigestContract(): Record<string, unknown> {
   const contract = requestTimeRootContract() as {
     protectedFiles: Record<string, string>;
   };
@@ -90,14 +90,16 @@ describe("Intern runtime contract parsing", () => {
   });
 
   test("accepts every runtime contract during the runtime-digest rollout", () => {
-    expect(runtimeDigestContract()).toEqual(canonical);
     expect(parseSiteRuntimeContract(previousCanonical)).toMatchObject({
       version: "intern-node-static-v1",
     });
     expect(parseSiteRuntimeContract(requestTimeRootContract())).toMatchObject({
       version: "intern-node-static-v1",
     });
-    expect(parseSiteRuntimeContract(runtimeDigestContract())).toMatchObject({
+    expect(parseSiteRuntimeContract(insecureRuntimeDigestContract())).toMatchObject({
+      version: "intern-node-static-v1",
+    });
+    expect(parseSiteRuntimeContract(canonical)).toMatchObject({
       version: "intern-node-static-v1",
     });
   });
@@ -120,6 +122,17 @@ describe("Intern runtime contract parsing", () => {
         true,
       );
     }
+    const insecureDigestContract = insecureRuntimeDigestContract() as {
+      protectedFiles: Record<string, string>;
+    };
+    expect(
+      isAcceptedProtectedFile(
+        "server.mjs",
+        renderProtectedFile(insecureDigestContract.protectedFiles["server.mjs"], 4100),
+        contract,
+        4100,
+      ),
+    ).toBe(true);
     expect(
       isAcceptedProtectedFile(
         "server.mjs",
