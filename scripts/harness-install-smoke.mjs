@@ -150,7 +150,10 @@ try {
     );
     assertRawOutputHasNoSecrets(`${host} manual setup`, setup);
     retainedOutput.push(setup.stdout, redact(setup.stderr));
-    if (!setup.stdout.includes("Intern connected to")) {
+    if (
+      !setup.stdout.includes("Signed in to Intern as Harness · admin.") ||
+      !setup.stdout.includes("configured.")
+    ) {
       throw new Error(`packaged setup did not configure ${host}`);
     }
   }
@@ -209,7 +212,7 @@ async function proveOAuthHost(host, setupCommand, fakeBin) {
   retainedOutput.push(setup.stdout, redact(setup.stderr));
   if (
     !setup.stdout.includes(
-      `Intern connected to ${host === "codex" ? "Codex" : "Claude Code"} as Harness · admin`,
+      `Signed in to Intern as Harness · admin. ${host === "codex" ? "Codex" : "Claude Code"} configured.`,
     )
   ) {
     throw new Error(`${host} setup did not validate the OAuth credential`);
