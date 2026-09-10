@@ -4,11 +4,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { InternSession } from "./api.js";
-import { InternAPI } from "./api.js";
+import { InternAPI, InternAPIError } from "./api.js";
 import { AuthClient } from "./auth.js";
 import { type InternConfig } from "./config.js";
 import { CredentialStore } from "./credential-store.js";
-import { DeviceAuthorization, type OAuthCandidate } from "./device-authorization.js";
+import {
+  DeviceAuthorization,
+  OAuthRefreshError,
+  type OAuthCandidate,
+} from "./device-authorization.js";
 import {
   DEFAULT_RULE_BLOCK,
   defaultRuleFile,
@@ -134,6 +138,29 @@ export async function runSetup(
     cancellation.signal.throwIfAborted();
     releaseLock = await acquireSetupLock(config.configRoot);
     cancellation.signal.throwIfAborted();
+    if (host === "codex" || host === "claude" || host === "grok") {
+      let available = false;
+      try {
+        available =
+          (
+            await run(
+              host,
+              ["--version"],
+              AbortSignal.any([cancellation.signal, AbortSignal.timeout(5_000)]),
+            )
+          ).status === 0;
+      } catch {
+        // Do not include host command output, which can contain private data.
+      }
+      cancellation.signal.throwIfAborted();
+      if (!available) {
+        throw new Error(
+          host === "grok"
+            ? "This setup requires the Grok Build CLI on this computer, not Grok Bot. In Grok Bot, add https://tryintern.dev/mcp as a remote connector. No sign-in or credentials were changed."
+            : `${HOST_DISPLAY_NAME[host]} CLI is unavailable. Install it on this computer before running setup. No sign-in or credentials were changed.`,
+        );
+      }
+    }
     const manualToken = dependencies.token?.trim();
     let verifiedSession: InternSession;
     if (manualToken) {
@@ -168,19 +195,29 @@ export async function runSetup(
           platformBaseURL: config.archAstroBaseURL,
           oauthClientID: config.oauthClientID,
         });
-      const candidate = await authorization.authorize(undefined, cancellation.signal);
-      cancellation.signal.throwIfAborted();
-      verifiedSession = dependencies.session
-        ? await dependencies.session(candidate.accessToken, cancellation.signal)
-        : await verifyCandidate(
-            config,
-            candidate.accessToken,
-            verbose,
-            dependencies.fetch,
-            cancellation.signal,
-          );
-      cancellation.signal.throwIfAborted();
-      await store.commit(candidate, cancellation.signal);
+      const storedSession = await verifyStoredSession(
+        config,
+        dependencies,
+        verbose,
+        cancellation.signal,
+      );
+      if (storedSession) {
+        verifiedSession = storedSession;
+      } else {
+        const candidate = await authorization.authorize(undefined, cancellation.signal);
+        cancellation.signal.throwIfAborted();
+        verifiedSession = dependencies.session
+          ? await dependencies.session(candidate.accessToken, cancellation.signal)
+          : await verifyCandidate(
+              config,
+              candidate.accessToken,
+              verbose,
+              dependencies.fetch,
+              cancellation.signal,
+            );
+        cancellation.signal.throwIfAborted();
+        await store.commit(candidate, cancellation.signal);
+      }
     }
 
     cancellation.signal.throwIfAborted();
@@ -197,7 +234,7 @@ export async function runSetup(
       dependencies.write ?? ((message: string) => process.stdout.write(message));
     const hostName = HOST_DISPLAY_NAME[host];
     write(
-      `Intern connected to ${hostName} as ${verifiedSession.user.org_name} · ${verifiedSession.user.org_role}.\n${nextAction(host, extra)}`,
+      `Signed in to Intern as ${verifiedSession.user.org_name} · ${verifiedSession.user.org_role}. ${hostName} configured.\n${nextAction(host, extra)}`,
     );
     if ((dependencies.defaultRule ?? "install") === "install") {
       write(await applyDefaultRule(host, hostName, env));
@@ -211,6 +248,38 @@ export async function runSetup(
     } finally {
       cancellation.dispose();
     }
+  }
+}
+
+async function verifyStoredSession(
+  config: InternConfig,
+  dependencies: SetupDependencies,
+  verbose: boolean,
+  signal: AbortSignal,
+): Promise<InternSession | undefined> {
+  const store = new CredentialStore(config.configRoot, {
+    platformBaseURL: config.archAstroBaseURL,
+    oauthClientID: config.oauthClientID,
+  });
+  // Only bound OAuth records qualify. Corrupt or differently bound records
+  // remain errors; legacy tokens and environment overrides are not reused.
+  if (!(await store.readOAuth())) return undefined;
+  try {
+    const token = await new AuthClient(config, { store, env: {} }).accessToken(signal);
+    return dependencies.session
+      ? await dependencies.session(token, signal)
+      : await verifyCandidate(config, token, verbose, dependencies.fetch, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof InternAPIError && error.status === 401) return undefined;
+    const cause = error instanceof Error ? error.cause : undefined;
+    if (
+      cause instanceof OAuthRefreshError &&
+      cause.status === 400 &&
+      cause.code === "invalid_grant"
+    )
+      return undefined;
+    throw error;
   }
 }
 

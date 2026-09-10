@@ -553,7 +553,8 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
     );
     expect(client.getInstructions()).toContain("INTERN_ACCESS_TOKEN");
     expect(client.getInstructions()).toContain("intern-mcp launch");
-    expect(client.getInstructions()).toContain("rerunning setup");
+    expect(client.getInstructions()).toContain("Setup reuses a valid saved session");
+    expect(client.getInstructions()).not.toContain("create a profile token");
     expect(client.getInstructions()).toContain("https://tryintern.dev/connect");
     for (const tool of tools.tools) expect(tool.title, tool.name).toBeTruthy();
     const prepare = tools.tools.find((tool) => tool.name === "intern_prepare_site");
@@ -595,6 +596,7 @@ test("advertises MCP titles, instructions, field descriptions, and workflow prom
         /root dist\/.*only generated output[\s\S]*never stage node_modules\//i,
       ),
     });
+    expect(JSON.stringify(workflow.messages)).not.toContain("create a token");
 
     const resources = await client.listResources();
     expect(
@@ -695,7 +697,11 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   await fs.writeFile(path.join(seed, "index.html"), "before\n");
   await fs.writeFile(
     path.join(seed, "package.json"),
-    '{"private":true,"type":"module"}\n',
+    '{"private":true,"type":"module","scripts":{"build":"node build.mjs"}}\n',
+  );
+  await fs.writeFile(
+    path.join(seed, "build.mjs"),
+    'import {copyFileSync,existsSync,mkdirSync} from "node:fs";mkdirSync("dist",{recursive:true});copyFileSync("index.html","dist/index.html");if(existsSync("untracked.txt"))copyFileSync("untracked.txt","dist/untracked.txt");\n',
   );
   await fs.writeFile(
     path.join(seed, "server.mjs"),
@@ -707,6 +713,8 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     path.join(seed, "src/main.js"),
     "document.body.dataset.ready = 'true';\n",
   );
+  await fs.mkdir(path.join(seed, "dist"));
+  await fs.writeFile(path.join(seed, "dist/index.html"), "before\n");
   await exec("git", ["add", "."], { cwd: seed });
   await exec("git", ["commit", "-m", "seed"], { cwd: seed });
   await exec("git", ["push", "origin", "HEAD:main"], { cwd: seed });
@@ -1072,10 +1080,17 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     name: "intern_site_status",
     arguments: { site: "docs" },
   });
-  expect(
-    (statusAfterTest.structuredContent as { workspace: { changes: string[] } })
-      .workspace.changes,
-  ).toEqual(changesBeforeTest);
+  const changesAfterTest = (
+    statusAfterTest.structuredContent as { workspace: { changes: string[] } }
+  ).workspace.changes;
+  expect(changesAfterTest).toEqual(
+    expect.arrayContaining([
+      ...changesBeforeTest,
+      " M dist/index.html",
+      "?? dist/untracked.txt",
+    ]),
+  );
+  expect(changesAfterTest).toHaveLength(changesBeforeTest.length + 2);
   const requestsBeforeStop = backendRequestCount;
   const stopped = await client.callTool({
     name: "intern_stop_test",
@@ -1088,7 +1103,10 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
   ).rejects.toThrow();
   for (const directory of new Set([...createdPreviewTemps, ...refreshedCreatedTemps]))
     await expect(fs.stat(directory)).rejects.toThrow();
-  await exec("git", ["restore", "index.html"], { cwd: structured.workspace.path });
+  await exec("git", ["restore", "index.html", "dist/index.html"], {
+    cwd: structured.workspace.path,
+  });
+  await fs.rm(path.join(structured.workspace.path, "dist/untracked.txt"));
   await fs.rm(path.join(structured.workspace.path, ".gitignore"));
   await fs.rm(path.join(structured.workspace.path, "untracked.txt"));
   await fs.rm(path.join(structured.workspace.path, "ignored.txt"));
@@ -1203,7 +1221,9 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     "show",
     "main:package.json",
   ]);
-  expect(rejectedRemotePackage.stdout).toBe('{"private":true,"type":"module"}\n');
+  expect(rejectedRemotePackage.stdout).toBe(
+    '{"private":true,"type":"module","scripts":{"build":"node build.mjs"}}\n',
+  );
 
   // The model repairs the repository, validates it, and commits the supported page edit.
   const { dependencies: _removedDependencies, ...supportedPackage } = invalidPackage;
@@ -1220,9 +1240,24 @@ test("an authorized MCP client prepares and publishes an Intern checkout over st
     path.join(structured.workspace.path, "index.html"),
     "published through MCP\n",
   );
-  await exec("git", ["add", "package.json", "index.html", "src/main.js"], {
-    cwd: structured.workspace.path,
+  const publishPreview = await client.callTool({
+    name: "intern_test_site",
+    arguments: { site: "docs" },
   });
+  expect(publishPreview.structuredContent).toMatchObject({
+    test: { running: true, validation: { valid: true } },
+  });
+  await client.callTool({
+    name: "intern_stop_test",
+    arguments: { site: "docs" },
+  });
+  await exec(
+    "git",
+    ["add", "package.json", "index.html", "src/main.js", "dist/index.html"],
+    {
+      cwd: structured.workspace.path,
+    },
+  );
   await exec("git", ["commit", "-m", "publish supported site"], {
     cwd: structured.workspace.path,
   });

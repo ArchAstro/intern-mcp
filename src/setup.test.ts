@@ -7,13 +7,15 @@ import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InternSession } from "./api.js";
+import { InternAPIError } from "./api.js";
+import { CredentialStore } from "./credential-store.js";
 import type { InternConfig } from "./config.js";
 import type { OAuthCandidate } from "./device-authorization.js";
 import {
   parseSetupOptions,
   promptAccessToken,
   readStoredAccessToken,
-  runSetup,
+  runSetup as actualRunSetup,
 } from "./setup.js";
 
 let root: string;
@@ -66,7 +68,267 @@ const rejectTokenPrompt = async (): Promise<string> => {
   throw new Error("setup prompted for a token");
 };
 
+function storedOAuthBytes(
+  platformBaseURL = candidate.platformBaseURL,
+  oauthClientID = candidate.oauthClientID,
+): Buffer {
+  return Buffer.from(
+    JSON.stringify({
+      version: 1,
+      platformBaseURL,
+      oauthClientID,
+      tokens: {
+        accessToken: "old-access",
+        refreshToken: "old-refresh",
+        expiresAtMs: candidate.expiresAtMs,
+        scope: "profile",
+      },
+    }),
+  );
+}
+
+// Existing setup scenarios assume an installed host. The preflight-specific
+// tests below call the real runner directly to exercise missing executables.
+const runSetup: typeof actualRunSetup = (config, host, dependencies = {}) =>
+  actualRunSetup(config, host, {
+    ...dependencies,
+    run: async (command, args, signal) => {
+      if (args.length === 1 && args[0] === "--version") {
+        return { status: 0, stdout: "test host version" };
+      }
+      if (!dependencies.run) throw new Error("unexpected host configuration command");
+      return dependencies.run(command, args, signal);
+    },
+  });
+
 describe("Intern MCP setup", () => {
+  it.each(["corrupt", "missing-expiry", "other-origin", "other-client"])(
+    "does not reuse or overwrite %s stored credentials",
+    async (kind) => {
+      await fs.mkdir(config.configRoot, { recursive: true });
+      let contents =
+        kind === "corrupt"
+          ? Buffer.from("not-json")
+          : storedOAuthBytes(
+              kind === "other-origin"
+                ? "https://another.example"
+                : candidate.platformBaseURL,
+              kind === "other-client" ? "cc_other" : candidate.oauthClientID,
+            );
+      if (kind === "missing-expiry") {
+        const record = JSON.parse(contents.toString()) as {
+          tokens: { expiresAtMs?: number };
+        };
+        delete record.tokens.expiresAtMs;
+        contents = Buffer.from(JSON.stringify(record));
+      }
+      const file = path.join(config.configRoot, "credentials.json");
+      await fs.writeFile(file, contents);
+      const authorize = vi.fn();
+      const verify = vi.fn();
+      const configure = vi.fn();
+      await expect(
+        runSetup(config, "cursor", {
+          env,
+          authorization: { authorize },
+          session: verify,
+          configure,
+        }),
+      ).rejects.toThrow("Stored Intern credentials");
+      expect(authorize).not.toHaveBeenCalled();
+      expect(verify).not.toHaveBeenCalled();
+      expect(configure).not.toHaveBeenCalled();
+      expect(await fs.readFile(file)).toEqual(contents);
+    },
+  );
+  it.each([200, 400, 503, "network"] as const)(
+    "retries an expired session through the real refresh endpoint (%s)",
+    async (refreshStatus) => {
+      let refreshes = 0;
+      let verifications = 0;
+      const server = createServer((request, response) => {
+        if (request.url === "/oauth/token") {
+          refreshes++;
+          if (refreshStatus === "network") {
+            request.socket.destroy();
+            return;
+          }
+          response.writeHead(refreshStatus, { "content-type": "application/json" });
+          response.end(
+            JSON.stringify(
+              refreshStatus === 200
+                ? {
+                    access_token: "refreshed",
+                    refresh_token: "rotated",
+                    expires_in: 3600,
+                    scope: "profile",
+                  }
+                : {
+                    error:
+                      refreshStatus === 400
+                        ? "invalid_grant"
+                        : "temporarily_unavailable",
+                  },
+            ),
+          );
+        } else if (request.url === "/api/v1/mcp/session") {
+          verifications++;
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify(session));
+        } else {
+          response.writeHead(404);
+          response.end();
+        }
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("missing listener");
+      const baseURL = `http://127.0.0.1:${address.port}`;
+      const localConfig = {
+        ...config,
+        internBaseURL: baseURL,
+        archAstroBaseURL: baseURL,
+      };
+      const store = new CredentialStore(config.configRoot, {
+        platformBaseURL: baseURL,
+        oauthClientID: config.oauthClientID,
+      });
+      await store.commit({ ...candidate, platformBaseURL: baseURL, expiresAtMs: 1 });
+      const before = await fs.readFile(
+        path.join(config.configRoot, "credentials.json"),
+      );
+      const authorize = vi.fn(async () => ({
+        ...candidate,
+        platformBaseURL: baseURL,
+        accessToken: "new-sign-in",
+      }));
+      const configure = vi.fn(async () => undefined);
+      try {
+        const result = runSetup(localConfig, "cursor", {
+          env,
+          authorization: { authorize },
+          configure,
+          write: () => {},
+        });
+        if (refreshStatus === 200 || refreshStatus === 400) {
+          await expect(result).resolves.toEqual(session);
+          expect(authorize).toHaveBeenCalledTimes(refreshStatus === 400 ? 1 : 0);
+          expect(verifications).toBe(1);
+          expect(configure).toHaveBeenCalledTimes(1);
+        } else {
+          await expect(result).rejects.toThrow("session refresh failed");
+          expect(authorize).not.toHaveBeenCalled();
+          expect(configure).not.toHaveBeenCalled();
+          expect(verifications).toBe(0);
+          expect(
+            await fs.readFile(path.join(config.configRoot, "credentials.json")),
+          ).toEqual(before);
+        }
+        expect(refreshes).toBe(1);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+  it("retries failed host configuration using the verified stored session", async () => {
+    const authorize = vi.fn(async () => candidate);
+    const verify = vi.fn(async () => session);
+    await expect(
+      runSetup(config, "cursor", {
+        env,
+        authorization: { authorize },
+        session: verify,
+        configure: async () => {
+          throw new Error("host configuration failed");
+        },
+      }),
+    ).rejects.toThrow("host configuration failed");
+    const before = await fs.readFile(path.join(config.configRoot, "credentials.json"));
+    const configure = vi.fn(async () => undefined);
+    await runSetup(config, "cursor", {
+      env,
+      authorization: { authorize },
+      session: verify,
+      configure,
+      write: () => {},
+    });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(verify).toHaveBeenLastCalledWith(
+      candidate.accessToken,
+      expect.any(AbortSignal),
+    );
+    expect(configure).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(path.join(config.configRoot, "credentials.json"))).toEqual(
+      before,
+    );
+  });
+
+  it.each([401, 503])(
+    "handles stored-session verification status %s without replacing an unverified session",
+    async (status) => {
+      const store = new CredentialStore(config.configRoot, {
+        platformBaseURL: config.archAstroBaseURL,
+        oauthClientID: config.oauthClientID,
+      });
+      await store.commit(candidate);
+      const before = await fs.readFile(
+        path.join(config.configRoot, "credentials.json"),
+      );
+      const authorize = vi.fn(async () => ({ ...candidate, accessToken: "new-token" }));
+      const configure = vi.fn(async () => undefined);
+      const verify = vi.fn(async (token: string) => {
+        if (token === candidate.accessToken)
+          throw new InternAPIError(status, "failure", "verification failed");
+        return session;
+      });
+      const result = runSetup(config, "cursor", {
+        env,
+        authorization: { authorize },
+        session: verify,
+        configure,
+        write: () => {},
+      });
+      if (status === 401) {
+        await expect(result).resolves.toEqual(session);
+        expect(authorize).toHaveBeenCalledTimes(1);
+        expect(configure).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(result).rejects.toMatchObject({ status: 503 });
+        expect(authorize).not.toHaveBeenCalled();
+        expect(configure).not.toHaveBeenCalled();
+        expect(
+          await fs.readFile(path.join(config.configRoot, "credentials.json")),
+        ).toEqual(before);
+      }
+    },
+  );
+  it.each(["throws ENOENT", "returns a failed status"])(
+    "rejects a missing Grok CLI before authorization or credential changes when the runner %s",
+    async (failure) => {
+      const authorize = vi.fn();
+      const commit = vi.fn();
+      const configure = vi.fn();
+      const run = vi.fn(async () => {
+        if (failure === "returns a failed status")
+          return { status: 1, stdout: "private process output" };
+        throw Object.assign(new Error("private process output"), { code: "ENOENT" });
+      });
+      await expect(
+        actualRunSetup(config, "grok", {
+          env,
+          authorization: { authorize },
+          store: { commit },
+          configure,
+          run,
+        }),
+      ).rejects.toThrow("Grok Build CLI");
+      expect(run).toHaveBeenCalledWith("grok", ["--version"], expect.any(AbortSignal));
+      expect(authorize).not.toHaveBeenCalled();
+      expect(commit).not.toHaveBeenCalled();
+      expect(configure).not.toHaveBeenCalled();
+    },
+  );
   it("authorizes, verifies the candidate, commits it, then configures the host", async () => {
     const order: string[] = [];
     const promptToken = vi.fn(async () => "should-not-be-used");
@@ -158,7 +420,10 @@ describe("Intern MCP setup", () => {
   ])("leaves credentials and host unchanged when %s", async (message) => {
     await fs.mkdir(config.configRoot, { recursive: true });
     await fs.writeFile(path.join(config.configRoot, "access-token"), "legacy\n");
-    await fs.writeFile(path.join(config.configRoot, "credentials.json"), "oauth\n");
+    await fs.writeFile(
+      path.join(config.configRoot, "credentials.json"),
+      storedOAuthBytes(),
+    );
     const commit = vi.fn();
     const configure = vi.fn();
 
@@ -171,6 +436,9 @@ describe("Intern MCP setup", () => {
           },
         },
         store: { commit },
+        session: async () => {
+          throw new InternAPIError(401, "unauthorized", "old session expired");
+        },
         configure,
         promptToken: rejectTokenPrompt,
       }),
@@ -181,7 +449,7 @@ describe("Intern MCP setup", () => {
     ).resolves.toBe("legacy\n");
     await expect(
       fs.readFile(path.join(config.configRoot, "credentials.json"), "utf8"),
-    ).resolves.toBe("oauth\n");
+    ).resolves.toBe(storedOAuthBytes().toString());
     expect(commit).not.toHaveBeenCalled();
     expect(configure).not.toHaveBeenCalled();
   });
@@ -189,7 +457,10 @@ describe("Intern MCP setup", () => {
   it("leaves both credential formats and the host unchanged when verification fails", async () => {
     await fs.mkdir(config.configRoot, { recursive: true });
     await fs.writeFile(path.join(config.configRoot, "access-token"), "legacy\n");
-    await fs.writeFile(path.join(config.configRoot, "credentials.json"), "oauth\n");
+    await fs.writeFile(
+      path.join(config.configRoot, "credentials.json"),
+      storedOAuthBytes(),
+    );
     const commit = vi.fn();
     const configure = vi.fn();
 
@@ -213,7 +484,7 @@ describe("Intern MCP setup", () => {
     ).resolves.toBe("legacy\n");
     await expect(
       fs.readFile(path.join(config.configRoot, "credentials.json"), "utf8"),
-    ).resolves.toBe("oauth\n");
+    ).resolves.toBe(storedOAuthBytes().toString());
   });
 
   it("retains a verified committed credential when host registration fails", async () => {
@@ -339,7 +610,7 @@ describe("Intern MCP setup", () => {
     const credentialsFile = path.join(config.configRoot, "credentials.json");
     const cursorFile = path.join(root, ".cursor", "mcp.json");
     const legacyBytes = Buffer.from("existing-legacy-token\n");
-    const oauthBytes = Buffer.from('{"existing":"oauth-record"}\n');
+    let oauthBytes = storedOAuthBytes();
     const hostBytes = Buffer.from('{"mcpServers":{"intern":{"command":"old"}}}\n');
     await fs.mkdir(config.configRoot, { recursive: true });
     await fs.mkdir(path.dirname(cursorFile), { recursive: true });
@@ -349,6 +620,11 @@ describe("Intern MCP setup", () => {
 
     let tokenPolls = 0;
     const server = createServer(async (request, response) => {
+      if (request.url === "/api/v1/mcp/session") {
+        response.writeHead(401, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
       if (request.url === "/oauth/device/authorize") {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(
@@ -378,6 +654,9 @@ describe("Intern MCP setup", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("server missing");
     const baseURL = `http://127.0.0.1:${address.port}`;
+
+    oauthBytes = storedOAuthBytes(baseURL, "cc_signal_test");
+    await fs.writeFile(credentialsFile, oauthBytes);
 
     try {
       for (const [signal, expectedCode] of [
@@ -439,7 +718,7 @@ describe("Intern MCP setup", () => {
     const credentialsFile = path.join(config.configRoot, "credentials.json");
     const cursorFile = path.join(root, ".cursor", "mcp.json");
     const legacyBytes = Buffer.from("existing-legacy-token\n");
-    const oauthBytes = Buffer.from('{"existing":"oauth-record"}\n');
+    let oauthBytes = storedOAuthBytes();
     const hostBytes = Buffer.from('{"mcpServers":{"intern":{"command":"old"}}}\n');
     await fs.mkdir(config.configRoot, { recursive: true });
     await fs.mkdir(path.dirname(cursorFile), { recursive: true });
@@ -479,12 +758,19 @@ describe("Intern MCP setup", () => {
         return;
       }
       if (request.url === "/api/v1/mcp/session") {
+        if (request.headers.authorization === "Bearer old-access") {
+          response.writeHead(401, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
         verificationStarted = true;
         return;
       }
       response.writeHead(404).end();
     });
     const baseURL = await listenTestServer(server);
+    oauthBytes = storedOAuthBytes(baseURL, "cc_signal_test");
+    await fs.writeFile(credentialsFile, oauthBytes);
     const child = spawnSetup(root, config.configRoot, baseURL, "cursor");
     const stderr: Buffer[] = [];
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -519,6 +805,7 @@ describe("Intern MCP setup", () => {
       fakeCodex,
       `#!/usr/bin/env node
 import fs from "node:fs";
+if (process.argv[2] === "--version") process.exit(0);
 fs.writeFileSync(process.env.HOST_PID_FILE, String(process.pid));
 setInterval(() => {}, 60000);
 `,
@@ -819,7 +1106,9 @@ setInterval(() => {}, 60000);
       command: "codex",
       args: ["mcp", "get", "intern", "--json"],
     });
-    expect(output.join("")).toContain("Intern connected to Codex as Acme · admin");
+    expect(output.join("")).toContain(
+      "Signed in to Intern as Acme · admin. Codex configured.",
+    );
     expect(output.join("")).not.toContain("secret-token");
   });
 
@@ -1214,7 +1503,7 @@ setInterval(() => {}, 60000);
       write: (message) => output.push(message),
     });
     expect(output.join("")).toContain("pi install npm:pi-mcp-adapter");
-    expect(output.join("")).toContain("Intern connected to Pi");
+    expect(output.join("")).toContain("Pi configured.");
   });
 
   it("registers Grok through grok mcp add without putting the token in argv", async () => {
@@ -1404,7 +1693,9 @@ setInterval(() => {}, 60000);
       // Outcome: setup finishes, the secret never appears, and the process
       // exits without Ctrl-C even though the stdin pipe is still open.
       expect(result, err).toEqual({ code: 0, signal: null });
-      expect(out).toContain("Intern connected to Cursor CLI as Acme · admin");
+      expect(out).toContain(
+        "Signed in to Intern as Acme · admin. Cursor CLI configured.",
+      );
       expect(out).toContain("ask it to build a site");
       expect(out).not.toContain("intern_auth_status");
       expect(out).not.toContain(token);
